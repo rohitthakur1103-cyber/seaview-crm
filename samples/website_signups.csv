@@ -1,0 +1,3 @@
+name,email,phone,tags,preferred_channel,consent,notes
+Taylor Green,tgreen@example.com,910-555-0126,website signup, email, yes, Signed up from homepage hero banner
+Jordan Price,,910-555-0162,in-store qr,sms,yes, Joined through QR code at checkout

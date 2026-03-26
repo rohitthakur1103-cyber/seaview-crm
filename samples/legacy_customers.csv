@@ -1,0 +1,3 @@
+customer_id,name,email,phone,city,state,tags,notes
+LEG-4001,Avery Brooks,avery@example.com,910-555-0198,Wilmington,NC,legacy newsletter,Imported from a 2024 expo signup sheet
+LEG-4002,Sam Patel,sam@example.com,910-555-0131,Hampstead,NC,retail seasonal,Interested in holiday seafood packages

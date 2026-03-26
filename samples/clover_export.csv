@@ -1,0 +1,3 @@
+customer_id,first_name,last_name,email,phone,item_name,quantity,order_total,purchase_date,tags
+CL-5551,Monica,Reed,monica@example.com,910-555-0188,Steamed Shrimp Platter,1,42.50,03/22/2026,repeat
+CL-5552,Eric,Stone,estone@example.com,910-555-0150,Crab Cake Meal,2,36.00,03/23/2026,new
