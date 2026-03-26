@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: seaview-crm
+    runtime: python
+    plan: free
+    buildCommand: "echo 'No additional build step required for seaview-crm'"
+    startCommand: "python3 app.py"
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.1"
+      - key: SEAVIEW_CRM_USERNAME
+        value: "seaview"
+      - key: SEAVIEW_CRM_PASSWORD
+        value: "crabshack-demo"
+      - key: SEAVIEW_SESSION_SECRET
+        generateValue: true

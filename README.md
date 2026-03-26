@@ -44,6 +44,18 @@ Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
 The app creates its SQLite database automatically at `data/seaview_crm.db`.
 
+## Render deployment
+
+This repo includes a project-specific Render config in `render.yaml` for `seaview-crm`.
+
+If you deploy from Render:
+
+- Service name: `seaview-crm`
+- Build command: `echo 'No additional build step required for seaview-crm'`
+- Start command: `python3 app.py`
+
+The app now reads `PORT` from the environment, so it works on Render without using generic WSGI placeholder names.
+
 ## Key pages
 
 - `/` dashboard for CRM and marketing overview
