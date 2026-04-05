@@ -65,12 +65,18 @@ The app now reads `PORT` from the environment, so it works on Render without usi
 - `/imports` legacy data imports
 - `/capture` internal lead capture page for staff use
 
-## Demo access
+## Staff access
 
-The current build includes a login screen so the app presents as staff-only software.
+The current build uses a fixed staff login.
 
-- For this demo, any username and password will enter the app.
-- Later, this should be replaced with real staff authentication.
+- Default username: `seaview`
+- Default password: `crabshack-demo`
+
+You can override these with environment variables:
+
+- `SEAVIEW_CRM_USERNAME`
+- `SEAVIEW_CRM_PASSWORD`
+- `SEAVIEW_SESSION_SECRET`
 
 ## Importing fragmented data
 
@@ -115,8 +121,8 @@ This prototype is built around a simple repeatable workflow:
 
 ## Suggested next steps
 
-1. Add authentication before using this beyond demos.
-2. Add real integrations for Clover, Constant Contact, and web forms.
-3. Add campaign send logging and customer last-contacted tracking.
-4. Add manual customer editing and staff notes.
-5. Add analytics for conversion, retention, and signup rate by touchpoint.
+1. Add real integrations for Clover, Constant Contact, and web forms.
+2. Add campaign send logging and outreach history.
+3. Add analytics for conversion, retention, and signup rate by touchpoint.
+4. Move to managed database/auth for production use.
+5. Add admin settings for staff onboarding and credential management.

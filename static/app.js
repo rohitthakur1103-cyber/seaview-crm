@@ -1,5 +1,6 @@
 document.addEventListener("DOMContentLoaded", () => {
   const dropzones = document.querySelectorAll("[data-dropzone]");
+  const copyButtons = document.querySelectorAll("[data-copy-url]");
 
   for (const dropzone of dropzones) {
     const input = dropzone.querySelector("[data-dropzone-input]");
@@ -67,5 +68,26 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     updateFileName();
+  }
+
+  for (const button of copyButtons) {
+    const originalLabel = button.textContent;
+    button.addEventListener("click", async () => {
+      const targetPath = button.getAttribute("data-copy-url");
+      if (!targetPath) {
+        return;
+      }
+
+      const fullUrl = new URL(targetPath, window.location.origin).toString();
+      try {
+        await navigator.clipboard.writeText(fullUrl);
+        button.textContent = "Copied";
+        window.setTimeout(() => {
+          button.textContent = originalLabel;
+        }, 1400);
+      } catch {
+        window.prompt("Copy this link:", fullUrl);
+      }
+    });
   }
 });

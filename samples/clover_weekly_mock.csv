@@ -1,0 +1,10 @@
+customer_id,first_name,last_name,email,phone,city,state,item_name,quantity,order_total,transaction_date,contact_channel,opt_in,tags,notes
+CL-9101,Monica,Reed,monica.reed@coastalmail.com,910-555-0188,Wilmington,NC,Steamed Shrimp Platter,1,42.50,03/22/2026,email,yes,repeat retail,"Prefers family meal deals"
+CL-9102,Eric,Stone,estone@harbormail.com,910-555-0150,Leland,NC,Crab Cake Meal,2,36.00,03/23/2026,email,yes,new guest,"First-time spring promo buyer"
+CL-9103,Danielle,King,dking@atlanticmail.com,910-555-0172,Carolina Beach,NC,Blue Crab Bushel,1,95.00,03/24/2026,sms,yes,vip weekend,"Responds to limited weekend inventory"
+CL-9104,Marcos,Alvarez,marcos.alvarez@docksideco.com,910-555-0191,Southport,NC,Wholesale Oyster Tray,4,220.00,03/24/2026,either,yes,wholesale restock,"Restaurant account interested in weekly tray availability"
+CL-9101,Monica,Reed,monica.reed@coastalmail.com,910-555-0188,Wilmington,NC,Low Country Boil Kit,1,58.00,03/29/2026,email,yes,repeat retail,"Bought again after weekend special"
+CL-9105,Janet,Price,,910-555-0148,Hampstead,NC,Fresh Fish Pack,1,31.50,03/25/2026,sms,no,in-store qr,"Phone-only capture from counter order"
+CL-9106,Tyler,Brooks,tyler.brooks@shorelinemarket.com,,Wrightsville Beach,NC,Soft Shell Crab Tray,2,145.00,03/26/2026,email,yes,wholesale prospect,"Retail partner interested in seasonal soft shell supply"
+CL-9107,Alicia,Mason,,,Wilmington,NC,Crab Dip,1,18.00,03/27/2026,,no,walk-in,"Paid in person but left no contact details"
+,,,,,,,,,,,,,,
