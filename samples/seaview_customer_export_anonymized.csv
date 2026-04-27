@@ -1,0 +1,13 @@
+Customer ID,First Name,Last Name,Phone Number,Email Address,Address Line 1,Address Line 2,Address Line 3,City,State / Province,Postal / Zip Code,Country,Customer Since,Marketing Allowed,Additional Addresses
+FAKE-0001,Maria,Lopez,9105550101,maria.lopez@example.com,"","","","","","","",2025-08-14,Yes,""
+FAKE-0002,James,Carter,9105550102,"","","","","","","","",2025-09-03,Yes,""
+FAKE-0003,Avery,Stone,"",avery.stone@example.com,"","","","","","","",2025-10-21,No,""
+FAKE-0004,Nina,Brooks,"","","","","","","","","",2025-11-02,No,""
+FAKE-0005,Caleb,Reed,"","","","","","","","","",2025-11-18,No,""
+FAKE-0006,"","","","","","","","","","","",2025-12-04,No,""
+FAKE-0007,"","","","","","","","","","","",2025-12-08,No,""
+FAKE-0008,Jordan,Wells,9105550102,"","","","","","","","",2026-01-15,No,""
+FAKE-0009,Taylor,Price,"",taylor.price@example.com,"","","","","","","",2026-01-23,Yes,""
+FAKE-0010,"","","","","","","","","","","",2026-02-01,No,""
+FAKE-0011,Sam,Rivera,"","","","","","","","","",2026-02-12,No,""
+FAKE-0012,Chris,Morgan,9105550112,chris.morgan@example.com,"","","","","","","",2026-03-09,Yes,""

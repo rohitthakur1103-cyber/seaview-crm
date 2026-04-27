@@ -2,16 +2,38 @@ services:
   - type: web
     name: seaview-crm
     runtime: python
-    plan: free
-    buildCommand: "echo 'No additional build step required for seaview-crm'"
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python3 app.py"
     autoDeploy: true
+    disk:
+      name: crm-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.13.1"
+      - key: RENDER
+        value: "true"
+      - key: DATA_DIR
+        value: "/data"
+      - key: PUBLIC_BASE_URL
+        sync: false
       - key: SEAVIEW_CRM_USERNAME
-        value: "seaview"
+        sync: false
       - key: SEAVIEW_CRM_PASSWORD
-        value: "crabshack-demo"
+        sync: false
       - key: SEAVIEW_SESSION_SECRET
         generateValue: true
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: "gpt-4o-mini"
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false

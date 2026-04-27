@@ -10,10 +10,11 @@ This project is a lightweight internal CRM for Seaview Crab Company. It is desig
 
 - Centralizes customer records in SQLite
 - Stores purchase history tied to each customer
-- Imports CSV exports from legacy and fragmented systems
+- Imports CSV and Excel exports from legacy and fragmented systems
 - Tracks touchpoints from website and in-person capture
 - Creates a marketing hub with audience segments and campaign planning
 - Exports audience CSVs so Seaview can send deals through its current marketing tools
+- Generates optional AI weekly briefs, campaign drafts, and capture-page copy when an OpenAI API key is configured
 
 ## Core product idea
 
@@ -42,7 +43,7 @@ python3 app.py
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-The app creates its SQLite database automatically at `data/seaview_crm.db`.
+The app creates its SQLite database automatically at `data/seaview_crm.db` unless `DATA_DIR` is set.
 
 ## Render deployment
 
@@ -51,39 +52,62 @@ This repo includes a project-specific Render config in `render.yaml` for `seavie
 If you deploy from Render:
 
 - Service name: `seaview-crm`
-- Build command: `echo 'No additional build step required for seaview-crm'`
+- Build command: `pip install -r requirements.txt`
 - Start command: `python3 app.py`
+- Persistent disk mounted at `/data`
+- `DATA_DIR=/data`
 
-The app now reads `PORT` from the environment, so it works on Render without using generic WSGI placeholder names.
+The app reads `PORT` and `DATA_DIR` from the environment, so SQLite and uploads survive redeploys when Render's persistent disk is attached.
 
 ## Key pages
 
 - `/` dashboard for CRM and marketing overview
 - `/login` staff login gate
 - `/customers` unified customer records
-- `/marketing` campaign planning, capture, and weekly marketing workflow
+- `/marketing` campaign planning, audiences, results, and weekly marketing workflow
 - `/imports` legacy data imports
 - `/capture` internal lead capture page for staff use
+- `/admin` settings, staff access, API configuration, and audit log
 
 ## Staff access
 
-The current build uses a fixed staff login.
+The app seeds two local staff users on first run:
 
-- Default username: `seaview`
-- Default password: `crabshack-demo`
+- Admin: `seaview` / `crabshack-demo`
+- Staff: `staff` / `seaview-staff`
 
-You can override these with environment variables:
+The legacy admin credentials can be overridden with environment variables:
 
 - `SEAVIEW_CRM_USERNAME`
 - `SEAVIEW_CRM_PASSWORD`
 - `SEAVIEW_SESSION_SECRET`
 
+After login, admins can add or deactivate staff from `/admin/staff`.
+
+## Optional AI features
+
+AI is disabled until an OpenAI API key is configured. Add it in one of two ways:
+
+1. Set `OPENAI_API_KEY` in Render or your local shell.
+2. Paste the key into `/admin` under AI Configuration.
+
+`OPENAI_API_KEY` from the environment takes priority over the stored admin setting. The default model is `gpt-4o-mini`, overrideable with `OPENAI_MODEL` or the Admin form.
+
+When configured, the app can:
+
+- generate an AI Weekly Brief from the dashboard
+- save an AI-generated campaign draft from Marketing
+- update QR/signup capture-page copy from Capture
+
+The AI helpers use existing CRM counts and never change import, export, or locked data logic.
+
 ## Importing fragmented data
 
-Use the Imports page to upload CSV exports from:
+Use the Imports page to upload CSV or Excel exports from:
 
 - Clover
 - Constant Contact
+- Freshline/customer spreadsheets
 - legacy Shopify
 - website signup tools
 - spreadsheets
