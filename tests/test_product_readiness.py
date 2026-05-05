@@ -175,6 +175,52 @@ class ProductReadinessTests(unittest.TestCase):
         finally:
             crm.ai.call_openai_json = original
 
+    def test_import_ai_brief_can_be_saved_with_import_history(self):
+        result = app.import_rows(
+            "legacy_csv",
+            "brief.csv",
+            [
+                {
+                    "First Name": "Brief",
+                    "Last Name": "Tester",
+                    "Email": "brief-tester@example.com",
+                    "Marketing Consent": "yes",
+                    "Order Total": "55",
+                    "Purchased At": "2026-05-01",
+                }
+            ],
+        )
+        self.assertIsNone(result["error_message"])
+        self.assertTrue(result["import_run_id"])
+
+        app.set_setting("openai_api_key", "sk-test")
+        original = app.generate_import_brief
+
+        def fake_import_brief(**_kwargs):
+            return {
+                "headline": "Import readout ready",
+                "summary": "The upload added a reachable customer profile.",
+                "takeaways": ["One new reachable customer was added."],
+                "actions": [{"title": "Send welcome note", "reason": "New reachable contact", "cta": "Draft the message"}],
+            }
+
+        try:
+            app.generate_import_brief = fake_import_brief
+            brief, error = app.generate_saved_import_ai_brief(result["import_run_id"])
+        finally:
+            app.generate_import_brief = original
+
+        self.assertIsNone(error)
+        self.assertEqual("Import readout ready", brief["headline"])
+
+        conn = app.db_connection()
+        try:
+            row = conn.execute("SELECT ai_brief_json, ai_brief_created_at FROM import_runs WHERE id = ?", (result["import_run_id"],)).fetchone()
+        finally:
+            conn.close()
+        self.assertIn("Import readout ready", row["ai_brief_json"])
+        self.assertTrue(row["ai_brief_created_at"])
+
     def test_campaign_export_logging_and_render_smoke(self):
         before = self._count("SELECT COUNT(*) AS count FROM outreach_history WHERE event_type = 'exported'")
         app.log_segment_export("email_ready")

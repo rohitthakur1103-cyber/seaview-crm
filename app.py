@@ -3535,14 +3535,21 @@ def session_cookie_value(user_id: int, username: str, role: str) -> str:
     return f"{payload}|{sig}"
 
 
-def clear_session_cookie_value() -> str:
-    return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+def session_cookie_attributes(*, secure: bool = False, max_age: int) -> str:
+    parts = ["Path=/", "HttpOnly", "SameSite=Lax", f"Max-Age={max_age}"]
+    if secure:
+        parts.append("Secure")
+    return "; ".join(parts)
 
 
-def auth_cookie_header_v2(user_id: int, username: str, role: str) -> str:
+def clear_session_cookie_value(*, secure: bool = False) -> str:
+    return f"{SESSION_COOKIE_NAME}=; {session_cookie_attributes(secure=secure, max_age=0)}"
+
+
+def auth_cookie_header_v2(user_id: int, username: str, role: str, *, secure: bool = False) -> str:
     return (
         f"{SESSION_COOKIE_NAME}={session_cookie_value(user_id, username, role)}; "
-        f"Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}"
+        f"{session_cookie_attributes(secure=secure, max_age=SESSION_MAX_AGE)}"
     )
 
 
@@ -7078,6 +7085,85 @@ def import_ai_brief_from_row(row: sqlite3.Row | None) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def persist_import_ai_brief(summary_id: int, brief: dict, user: dict | None = None, client_ip: str = "") -> str:
+    saved_at = utc_now()
+    conn = db_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE import_runs
+            SET ai_brief_json = ?, ai_brief_created_at = ?
+            WHERE id = ?
+            """,
+            (json.dumps(brief), saved_at, summary_id),
+        )
+        if user:
+            log_audit(
+                conn,
+                user["id"],
+                user["username"],
+                "imports_ai_brief_saved",
+                f"Saved AI brief for import {summary_id}",
+                client_ip,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return saved_at
+
+
+def generate_saved_import_ai_brief(summary_id: int, user: dict | None = None, client_ip: str = "") -> tuple[dict | None, str | None]:
+    if not ai_is_configured(get_setting):
+        return None, "OpenAI API key is not configured."
+
+    conn = db_connection()
+    try:
+        summary_row = conn.execute("SELECT * FROM import_runs WHERE id = ?", (summary_id,)).fetchone()
+        import_summary = import_summary_from_row(summary_row)
+        if not summary_row or not import_summary:
+            return None, "No import intelligence summary is available yet."
+        context = ai_import_context(conn, import_summary, summary_row)
+    finally:
+        conn.close()
+
+    try:
+        brief = generate_import_brief(
+            api_key=api_key_from_settings(get_setting),
+            model=model_from_settings(get_setting),
+            context=context,
+        )
+    except AIError as exc:
+        return None, str(exc)
+
+    persist_import_ai_brief(summary_id, brief, user=user, client_ip=client_ip)
+    return brief, None
+
+
+def healthcheck_response() -> tuple[HTTPStatus, bytes]:
+    conn = db_connection()
+    try:
+        conn.execute("SELECT 1").fetchone()
+    except Exception as exc:
+        logger.exception("Health check failed")
+        payload = json.dumps({"ok": False, "service": "seaview-crm", "error": str(exc)[:120]}).encode("utf-8")
+        return HTTPStatus.INTERNAL_SERVER_ERROR, payload
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    payload = json.dumps(
+        {
+            "ok": True,
+            "service": "seaview-crm",
+            "database": str(DB_PATH),
+            "time": utc_now(),
+        }
+    ).encode("utf-8")
+    return HTTPStatus.OK, payload
+
+
 def render_ai_weekly_brief(brief: dict, user: dict | None, message: str = "") -> bytes:
     actions = brief.get("actions") if isinstance(brief.get("actions"), list) else []
     action_html = "".join(
@@ -7675,6 +7761,9 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
     def current_user(self) -> dict | None:
         return get_current_user(self.headers.get("Cookie"))
 
+    def request_is_secure(self) -> bool:
+        return public_origin_for_request(self).lower().startswith("https://")
+
     def requires_auth(self, path: str) -> bool:
         if path == "/login":
             return False
@@ -7688,6 +7777,43 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
 
     def requires_admin(self, path: str) -> bool:
         return path.startswith("/admin")
+
+    def do_HEAD(self) -> None:
+        parsed = urlparse(self.path)
+        prune_pending_imports()
+
+        if self.requires_auth(parsed.path) and not self.is_authenticated():
+            self.respond_redirect("/login?" + message_query("Staff login required."))
+            return
+
+        if parsed.path == "/healthz":
+            status, payload = healthcheck_response()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+
+        if parsed.path == "/static/styles.css":
+            payload = static_asset_bytes("static/styles.css")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/css; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+
+        if parsed.path == "/static/app.js":
+            payload = static_asset_bytes("static/app.js")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+
+        self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "HEAD not supported for this path")
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -7712,28 +7838,8 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             self.respond_html(render_login(message))
             return
         if parsed.path == "/healthz":
-            conn = db_connection()
-            try:
-                conn.execute("SELECT 1").fetchone()
-            except Exception as exc:
-                logger.exception("Health check failed")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                payload = json.dumps({"ok": False, "service": "seaview-crm", "error": str(exc)[:120]}).encode("utf-8")
-                self.respond_bytes(payload, "application/json; charset=utf-8", status=HTTPStatus.INTERNAL_SERVER_ERROR, headers={"Cache-Control": "no-store"})
-                return
-            conn.close()
-            payload = json.dumps(
-                {
-                    "ok": True,
-                    "service": "seaview-crm",
-                    "database": str(DB_PATH),
-                    "time": utc_now(),
-                }
-            ).encode("utf-8")
-            self.respond_bytes(payload, "application/json; charset=utf-8", headers={"Cache-Control": "no-store"})
+            status, payload = healthcheck_response()
+            self.respond_bytes(payload, "application/json; charset=utf-8", status=status, headers={"Cache-Control": "no-store"})
             return
         if parsed.path in PUBLIC_CAPTURE_VARIANTS:
             self.respond_html(render_public_capture(parsed.path, message))
@@ -7992,7 +8098,10 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                     conn.commit()
                 finally:
                     conn.close()
-            self.respond_redirect("/login?" + message_query("You have been signed out."), headers={"Set-Cookie": clear_session_cookie_value()})
+            self.respond_redirect(
+                "/login?" + message_query("You have been signed out."),
+                headers={"Set-Cookie": clear_session_cookie_value(secure=self.request_is_secure())},
+            )
             return
         if parsed.path == "/static/styles.css":
             css = static_asset_bytes("static/styles.css")
@@ -8097,7 +8206,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
 
-            cookie = auth_cookie_header_v2(user["id"], user["username"], user["role"])
+            cookie = auth_cookie_header_v2(user["id"], user["username"], user["role"], secure=self.request_is_secure())
             self.respond_redirect("/", headers={"Set-Cookie": cookie})
             return
         if self.path in PUBLIC_CAPTURE_VARIANTS:
@@ -8542,27 +8651,12 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                 )
                 return
             if brief_mode == "save":
-                conn = db_connection()
-                try:
-                    conn.execute(
-                        """
-                        UPDATE import_runs
-                        SET ai_brief_json = ?, ai_brief_created_at = ?
-                        WHERE id = ?
-                        """,
-                        (json.dumps(brief), utc_now(), int(summary_id)),
-                    )
-                    log_audit(
-                        conn,
-                        user["id"],
-                        user["username"],
-                        "ai_import_brief_saved",
-                        f"Saved AI brief for import {summary_id}",
-                        self.client_address[0] if getattr(self, "client_address", None) else "",
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
+                persist_import_ai_brief(
+                    int(summary_id),
+                    brief,
+                    user=user,
+                    client_ip=self.client_address[0] if getattr(self, "client_address", None) else "",
+                )
                 self.respond_redirect(
                     f"/imports/ai-brief?summary={summary_id}&" + message_query("AI brief saved to import history.")
                 )
@@ -8731,10 +8825,21 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
             refresh_task_recommendations("import_completed")
+            ai_note = ""
+            if result["import_run_id"] and ai_is_configured(get_setting):
+                _brief, ai_error = generate_saved_import_ai_brief(
+                    int(result["import_run_id"]),
+                    user=user,
+                    client_ip=self.client_address[0] if getattr(self, "client_address", None) else "",
+                )
+                if ai_error:
+                    ai_note = f" AI readout could not be saved: {ai_error[:140]}."
+                else:
+                    ai_note = " AI readout saved to import history."
             message = (
                 f"Imported {result['rows_received']} rows. Created {result['customers_created']} customers, "
                 f"merged {result['customers_updated']}, sent {result['review_needed_rows']} to review, "
-                f"skipped {result['skipped_rows']}, and added {result['purchase_events_created']} purchase records."
+                f"skipped {result['skipped_rows']}, and added {result['purchase_events_created']} purchase records.{ai_note}"
             )
             self.respond_redirect("/imports?" + urlencode({"summary": str(result["import_run_id"] or ""), "message": message}))
             return
