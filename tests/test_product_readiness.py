@@ -221,6 +221,37 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertIn("Import readout ready", row["ai_brief_json"])
         self.assertTrue(row["ai_brief_created_at"])
 
+    def test_import_ai_brief_generic_failure_is_non_blocking(self):
+        result = app.import_rows(
+            "legacy_csv",
+            "brief-failure.csv",
+            [
+                {
+                    "First Name": "Brief",
+                    "Last Name": "Failure",
+                    "Email": "brief-failure@example.com",
+                    "Marketing Consent": "yes",
+                }
+            ],
+        )
+        self.assertIsNone(result["error_message"])
+        self.assertTrue(result["import_run_id"])
+
+        app.set_setting("openai_api_key", "sk-test")
+        original = app.generate_import_brief
+
+        def fake_import_brief(**_kwargs):
+            raise RuntimeError("model returned malformed JSON")
+
+        try:
+            app.generate_import_brief = fake_import_brief
+            brief, error = app.generate_saved_import_ai_brief(result["import_run_id"])
+        finally:
+            app.generate_import_brief = original
+
+        self.assertIsNone(brief)
+        self.assertIn("model returned malformed JSON", error)
+
     def test_campaign_export_logging_and_render_smoke(self):
         before = self._count("SELECT COUNT(*) AS count FROM outreach_history WHERE event_type = 'exported'")
         app.log_segment_export("email_ready")

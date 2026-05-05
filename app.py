@@ -4909,10 +4909,12 @@ def render_tasks(message: str = "", user: dict | None = None, filter_key: str = 
         <h3>Task list</h3>
         <div class="filter-row">{filter_links}</div>
       </div>
-      <table>
-        <thead><tr><th>Priority</th><th>Task</th><th>Type</th><th>Customer</th><th>Source</th><th>Status</th><th>Due</th><th></th></tr></thead>
-        <tbody>{open_tasks_html}</tbody>
-      </table>
+      <div class="scrollable-table task-table-wrap">
+        <table class="task-table">
+          <thead><tr><th>Priority</th><th>Task</th><th>Type</th><th>Customer</th><th>Source</th><th>Status</th><th>Due</th><th></th></tr></thead>
+          <tbody>{open_tasks_html}</tbody>
+        </table>
+      </div>
     </div>
     """
     return base_layout("Tasks", body, flash=message, active_section="tasks", user=user)
@@ -7136,8 +7138,15 @@ def generate_saved_import_ai_brief(summary_id: int, user: dict | None = None, cl
         )
     except AIError as exc:
         return None, str(exc)
+    except Exception as exc:
+        logger.exception("AI import brief failed for import %s", summary_id)
+        return None, str(exc)[:220]
 
-    persist_import_ai_brief(summary_id, brief, user=user, client_ip=client_ip)
+    try:
+        persist_import_ai_brief(summary_id, brief, user=user, client_ip=client_ip)
+    except Exception as exc:
+        logger.exception("AI import brief persistence failed for import %s", summary_id)
+        return None, str(exc)[:220]
     return brief, None
 
 
@@ -8809,7 +8818,12 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             if not pending:
                 self.respond_redirect("/imports?" + message_query("Import preview expired. Upload the file again."))
                 return
-            result = import_rows(pending["source_system"], pending["filename"], pending["rows"])
+            try:
+                result = import_rows(pending["source_system"], pending["filename"], pending["rows"])
+            except Exception as exc:
+                logger.exception("Import confirmation failed for pending import %s", import_id)
+                self.respond_redirect("/imports?" + message_query(f"Import failed: {str(exc)[:120]}"))
+                return
             if result["error_message"]:
                 self.respond_redirect("/imports?" + message_query("Import failed."))
                 return
@@ -8826,18 +8840,12 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                 conn.commit()
             finally:
                 conn.close()
-            refresh_task_recommendations("import_completed")
+            refresh_summary = refresh_task_recommendations("import_completed")
             ai_note = ""
             if result["import_run_id"] and ai_is_configured(get_setting):
-                _brief, ai_error = generate_saved_import_ai_brief(
-                    int(result["import_run_id"]),
-                    user=user,
-                    client_ip=self.client_address[0] if getattr(self, "client_address", None) else "",
-                )
-                if ai_error:
-                    ai_note = f" AI readout could not be saved: {ai_error[:140]}."
-                else:
-                    ai_note = " AI readout saved to import history."
+                ai_note = " AI readout is ready to generate from the import summary."
+            if refresh_summary.get("error_message") and not ai_note:
+                ai_note = " Task recommendations used the rule fallback."
             message = (
                 f"Imported {result['rows_received']} rows. Created {result['customers_created']} customers, "
                 f"merged {result['customers_updated']}, sent {result['review_needed_rows']} to review, "
