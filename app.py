@@ -4709,20 +4709,20 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
     <section class="panel operating-brief">
       <span class="eyebrow">CRM Operating Brain</span>
       <div class="operating-brief-grid">
-        <div>
+        <div class="operating-brief-card">
           <strong>What changed</strong>
           <p>{escape(what_changed)}</p>
         </div>
-        <div>
+        <div class="operating-brief-card">
           <strong>What matters</strong>
           <p>{escape(what_matters)}</p>
         </div>
-        <div>
+        <div class="operating-brief-card">
           <strong>What to do next</strong>
           <p>{escape(what_next)}</p>
         </div>
       </div>
-      <p class="muted">{escape(refresh_line)}</p>
+      <p class="muted task-refresh-details">{escape(refresh_line)}</p>
     </section>
 
     <!-- ZONE 2 + 3: Action plan + Activity feed -->
@@ -5779,8 +5779,10 @@ def render_imports(
     guide_rows = "".join(
         f"""
         <li>
-          <strong>{escape(guide['label'])}</strong>
-          <span>{escape(guide['summary'])}</span>
+          <div class="import-type-copy">
+            <strong>{escape(guide['label'])}</strong>
+            <span>{escape(guide['summary'])}</span>
+          </div>
           <a class="button secondary small" href="{escape(guide['sample_file'])}" target="_blank">Sample</a>
         </li>
         """
