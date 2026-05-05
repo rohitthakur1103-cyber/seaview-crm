@@ -5,6 +5,7 @@ services:
     plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python3 app.py"
+    healthCheckPath: "/healthz"
     autoDeploy: true
     disk:
       name: crm-data

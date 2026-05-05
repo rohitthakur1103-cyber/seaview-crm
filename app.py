@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import secrets
 import socket
@@ -19,6 +20,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR / "data")))
@@ -4413,6 +4420,7 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
         capture_gap = capture_gap_with_conn(conn)
         freshline_cleanup = freshline_cleanup_with_conn(conn, limit=25)
         business_segments = business_audience_segments_with_conn(conn)
+        last_task_refresh = latest_task_refresh_run_with_conn(conn)
     finally:
         conn.close()
 
@@ -4540,11 +4548,15 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
         ).fetchall()
         open_task_rows = conn2.execute(
             """
-            SELECT t.id, t.title, t.due_at, t.customer_id, c.first_name, c.last_name
+            SELECT
+                t.id, t.title, t.details, t.due_at, t.customer_id,
+                t.priority, t.priority_score, t.source, t.related_metric,
+                c.first_name, c.last_name
             FROM tasks t
             LEFT JOIN customers c ON c.id = t.customer_id
             WHERE t.status = 'open'
             ORDER BY
+                COALESCE(t.priority_score, 50) DESC,
                 CASE WHEN t.due_at IS NULL OR t.due_at = '' THEN 1 ELSE 0 END,
                 t.due_at ASC,
                 t.created_at DESC
@@ -4590,9 +4602,15 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
     open_tasks_html = "".join(
         f"""
         <li class="action-item">
-          <span class="action-number">&#9744;</span>
+          <span class="priority-badge priority-{escape(task_row_value(row, 'priority', 'medium') or 'medium')}">{escape((task_row_value(row, 'priority', 'medium') or 'medium').title())}</span>
           <div class="action-body">
             <strong>{escape(row['title'])}</strong>
+            <p>{escape(row['details'] or '')}</p>
+            <p class="muted">
+              Score {int(task_row_value(row, 'priority_score', 50) or 50)}
+              &middot; {escape(task_source_label(task_row_value(row, 'source', 'manual')))}
+              {('&middot; ' + escape(task_row_value(row, 'related_metric', ''))) if task_row_value(row, 'related_metric', '') else ''}
+            </p>
             {"<p>" + escape(display_name(row)) + "</p>" if row['first_name'] or row['last_name'] else ""}
             {"<p class='muted'>" + escape(display_timestamp(row['due_at'], include_time=False)) + "</p>" if row['due_at'] else ""}
           </div>
@@ -4604,6 +4622,26 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
     # Capture gap % for stat tile
     capture_gap_pct = f"{capture_gap['capture_rate']:.1f}%" if capture_gap["clover_total"] else "—"
     freshline_reachable = capture_gap.get("freshline_campaign_ready", data_quality.get("campaign_ready", 0))
+    what_changed = (
+        f"Latest import: {latest_import['customers_created']} created, {latest_import['customers_updated']} updated, "
+        f"{latest_import['review_needed_rows'] or 0} sent to duplicate review."
+        if latest_import
+        else "No import has been confirmed yet. Start with a customer export so the dashboard has real context."
+    )
+    what_matters = (
+        f"{freshline_reachable:,} customers are campaign-ready, {unreachable:,} need contact info, "
+        f"and {duplicate_groups:,} duplicate group{'s' if duplicate_groups != 1 else ''} need review."
+    )
+    what_next = (
+        open_task_rows[0]["title"]
+        if open_task_rows
+        else "Import fresh customer data or capture new leads to generate the next operating task."
+    )
+    refresh_line = (
+        f"Task brain refreshed {display_timestamp(last_task_refresh['created_at'])} from {last_task_refresh['trigger_event']}."
+        if last_task_refresh
+        else "Task recommendations have not been refreshed yet."
+    )
     if ai_is_configured(get_setting):
         ai_dashboard_html = """
         <section class="panel ai-panel">
@@ -4661,6 +4699,25 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
       </article>
     </section>
 
+    <section class="panel operating-brief">
+      <span class="eyebrow">CRM Operating Brain</span>
+      <div class="operating-brief-grid">
+        <div>
+          <strong>What changed</strong>
+          <p>{escape(what_changed)}</p>
+        </div>
+        <div>
+          <strong>What matters</strong>
+          <p>{escape(what_matters)}</p>
+        </div>
+        <div>
+          <strong>What to do next</strong>
+          <p>{escape(what_next)}</p>
+        </div>
+      </div>
+      <p class="muted">{escape(refresh_line)}</p>
+    </section>
+
     <!-- ZONE 2 + 3: Action plan + Activity feed -->
     <section class="dash-grid">
       <div class="panel">
@@ -4677,7 +4734,12 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
     <section class="panel">
       <div class="panel-head">
         <h3>Open Tasks</h3>
-        <a class="button secondary small" href="/tasks">All tasks</a>
+        <div class="button-row">
+          <form method="post" action="/tasks/refresh" class="inline-form">
+            <button type="submit" class="button secondary small">Refresh Task Recommendations</button>
+          </form>
+          <a class="button secondary small" href="/tasks">All tasks</a>
+        </div>
       </div>
       <ol class="action-plan-list">{open_tasks_html}</ol>
     </section>
@@ -4686,49 +4748,126 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
     return base_layout("Seaview CRM Dashboard", body, flash=message, active_section="dashboard", user=user)
 
 
-def render_tasks(message: str = "", user: dict | None = None) -> bytes:
+def task_source_label(value: str | None) -> str:
+    return {
+        "ai": "AI",
+        "rule": "Rule-based",
+        "manual": "Manual",
+    }.get((value or "manual").lower(), "Manual")
+
+
+def task_row_value(row: sqlite3.Row, key: str, default=None):
+    return row[key] if key in row.keys() else default
+
+
+def task_refresh_message(summary: dict) -> str:
+    if summary.get("used_ai"):
+        return "Task recommendations refreshed using latest CRM context."
+    if summary.get("error_message"):
+        return "AI recommendations were unavailable, so rule-based task recommendations were used."
+    return "Task recommendations refreshed using rule-based logic because AI is not configured."
+
+
+def render_tasks(message: str = "", user: dict | None = None, filter_key: str = "all") -> bytes:
     conn = db_connection()
     try:
         counts = task_counts_with_conn(conn)
-        open_rows = list_tasks_with_conn(conn, status="open", limit=20)
+        source_filter = filter_key if filter_key in {"manual", "ai", "rule"} else None
+        status_filter = "completed" if filter_key == "completed" else "all"
+        open_rows = list_tasks_with_conn(conn, status=status_filter, limit=80, source=source_filter)
+        if filter_key == "high":
+            open_rows = [row for row in open_rows if task_row_value(row, "priority", "medium") == "high"]
         completed_rows = list_tasks_with_conn(conn, status="completed", limit=8)
+        last_refresh = latest_task_refresh_run_with_conn(conn)
     finally:
         conn.close()
 
     open_tasks_html = "".join(
         f"""
-        <tr>
-          <td><strong>{escape(row['title'])}</strong><div class="muted">{escape(row['details'] or '')}</div></td>
+        <tr class="task-row task-priority-{escape(task_row_value(row, 'priority', 'medium') or 'medium')}">
+          <td>
+            <span class="priority-badge priority-{escape(task_row_value(row, 'priority', 'medium') or 'medium')}">{escape((task_row_value(row, 'priority', 'medium') or 'medium').title())}</span>
+            <span class="score-badge">{int(task_row_value(row, 'priority_score', 50) or 50)}</span>
+          </td>
+          <td>
+            <strong>{escape(row['title'])}</strong>
+            <div class="muted">{escape(row['details'] or '')}</div>
+            {f"<div class='task-reason'>Why: {escape(task_row_value(row, 'ai_reason', ''))}</div>" if task_row_value(row, 'ai_reason', '') else ""}
+            {f"<div class='task-metric'>Metric: {escape(task_row_value(row, 'related_metric', ''))}</div>" if task_row_value(row, 'related_metric', '') else ""}
+          </td>
           <td>{escape(task_type_label(row['task_type']))}</td>
           <td>{"<a href='/customers/%s'>%s</a>" % (row['customer_id'], escape(display_name(row))) if row['customer_id'] else 'General'}</td>
+          <td><span class="source-pill source-{escape(task_row_value(row, 'source', 'manual') or 'manual')}">{escape(task_source_label(task_row_value(row, 'source', 'manual')))}</span></td>
+          <td>{escape((row['status'] or 'open').title())}</td>
           <td>{escape(display_timestamp(row['due_at'], include_time=False) if row['due_at'] else 'No due date')}</td>
           <td>
+            {""
+            if row["status"] == "completed"
+            else f'''
             <form method="post" action="/tasks/complete">
               <input type="hidden" name="task_id" value="{row['id']}">
               <button type="submit" class="button secondary small">Complete</button>
             </form>
+            '''}
           </td>
         </tr>
         """
         for row in open_rows
-    ) or "<tr><td colspan='5'>No open tasks.</td></tr>"
+    ) or "<tr><td colspan='8'>No tasks match this view.</td></tr>"
 
     completed_tasks_html = "".join(
         f"<li><strong>{escape(row['title'])}</strong><span>{escape(display_timestamp(row['completed_at']))}</span></li>"
         for row in completed_rows
     ) or "<li>No completed tasks yet.</li>"
+    filter_options = [
+        ("all", "All"),
+        ("high", "High priority"),
+        ("ai", "AI recommended"),
+        ("rule", "Rule-based"),
+        ("manual", "Manual"),
+        ("completed", "Completed"),
+    ]
+    filter_links = "".join(
+        f"<a class='filter-pill {'active' if filter_key == key else ''}' href='/tasks?filter={key}'>{label}</a>"
+        for key, label in filter_options
+    )
+    last_refresh_html = ""
+    if last_refresh:
+        mode = "AI" if last_refresh["used_ai"] else "Rule fallback"
+        error = f"<dd>{escape(last_refresh['error_message'])}</dd>" if last_refresh["error_message"] else "<dd>None</dd>"
+        last_refresh_html = f"""
+        <dl class="details task-refresh-details">
+          <dt>Last refresh</dt><dd>{escape(display_timestamp(last_refresh['created_at']))}</dd>
+          <dt>Trigger</dt><dd>{escape(last_refresh['trigger_event'])}</dd>
+          <dt>Mode</dt><dd>{escape(mode)}</dd>
+          <dt>Created / updated</dt><dd>{last_refresh['tasks_created']} / {last_refresh['tasks_updated']}</dd>
+          <dt>Error</dt>{error}
+        </dl>
+        """
 
     body = f"""
     <section class="page-head">
       <div>
         <h2>Tasks</h2>
-        <p>Track follow-ups and weekly work.</p>
+        <p>Prioritized CRM operations work based on the latest customer, capture, import, and campaign context.</p>
       </div>
+      <form method="post" action="/tasks/refresh">
+        <button type="submit">Refresh Task Recommendations</button>
+      </form>
     </section>
 
     <section class="stats">
       <article><span>Open tasks</span><strong>{counts['open']}</strong></article>
       <article><span>Completed</span><strong>{counts['completed']}</strong></article>
+    </section>
+    <section class="panel task-refresh-panel">
+      <div class="panel-head">
+        <div>
+          <h3>Recommendation refresh</h3>
+          <p class="muted">Uses compact CRM metrics. Manual tasks are never overwritten.</p>
+        </div>
+      </div>
+      {last_refresh_html or "<p class='muted'>No task recommendation refresh has run yet.</p>"}
     </section>
 
     <section class="grid">
@@ -4759,9 +4898,12 @@ def render_tasks(message: str = "", user: dict | None = None) -> bytes:
     </section>
 
     <div class="panel">
-      <h3>Open tasks</h3>
+      <div class="panel-head">
+        <h3>Task list</h3>
+        <div class="filter-row">{filter_links}</div>
+      </div>
       <table>
-        <thead><tr><th>Task</th><th>Type</th><th>Customer</th><th>Due</th><th></th></tr></thead>
+        <thead><tr><th>Priority</th><th>Task</th><th>Type</th><th>Customer</th><th>Source</th><th>Status</th><th>Due</th><th></th></tr></thead>
         <tbody>{open_tasks_html}</tbody>
       </table>
     </div>
@@ -5118,7 +5260,7 @@ def render_marketing(message: str = "", user: dict | None = None) -> bytes:
     campaign_status_counts = {row["status"]: row["count"] for row in snapshot["campaign_totals"]}
     business_segment_rows = [segment for segment in snapshot["segments"] if segment["key"] in BUSINESS_SEGMENT_KEYS]
     segment_rows = "".join(
-        f"<tr><td><strong>{escape(segment['label'])}</strong></td><td>{segment['count']}</td><td>{escape(segment['recommended_channel'])}</td><td><a class='button secondary small' href='/marketing/export?segment={escape(segment['key'])}'>Export</a></td></tr>"
+        f"<tr><td><strong>{escape(segment['label'])}</strong></td><td>{segment['count']}</td><td>{escape(segment['recommended_channel'])}</td><td><a class='button secondary small' href='/marketing/export/preview?segment={escape(segment['key'])}'>Preview export</a></td></tr>"
         for segment in business_segment_rows
     )
     named_segment_keys = [
@@ -5137,7 +5279,7 @@ def render_marketing(message: str = "", user: dict | None = None) -> bytes:
         f"<td><strong>{escape(segment['label'])}</strong><div class='muted'>{escape(segment['description'])}</div></td>"
         f"<td>{segment['count']:,}</td>"
         f"<td>{escape(segment['recommended_channel'])}</td>"
-        f"<td><a class='button secondary small' href='/marketing/export?segment={escape(segment['key'])}'>Export CSV</a></td>"
+        f"<td><a class='button secondary small' href='/marketing/export/preview?segment={escape(segment['key'])}'>Preview CSV</a></td>"
         "</tr>"
         for segment in snapshot["segments"]
         if segment["key"] in named_segment_keys
@@ -5191,7 +5333,7 @@ def render_marketing(message: str = "", user: dict | None = None) -> bytes:
     for row in snapshot["recent_campaigns"]:
         export_query = urlencode({"segment": row["target_segment"], "campaign_id": str(row["id"])})
         actions = [
-            f"<a class='button secondary small' href='/marketing/export?{escape(export_query)}'>Export</a>"
+            f"<a class='button secondary small' href='/marketing/export/preview?{escape(export_query)}'>Preview export</a>"
         ]
         if row["status"] != "sent":
             actions.append(
@@ -5489,12 +5631,114 @@ def render_marketing(message: str = "", user: dict | None = None) -> bytes:
     return base_layout("Marketing", body, flash=message, active_section="marketing", user=user)
 
 
+def render_campaign_export_preview(
+    segment_key: str,
+    campaign_id: int | None = None,
+    message: str = "",
+    user: dict | None = None,
+) -> bytes:
+    segments = segment_definitions()
+    segment = segments.get(segment_key)
+    if not segment:
+        return base_layout(
+            "Audience Not Found",
+            "<div class='panel'><h2>Audience not found</h2><p>Choose a valid marketing audience before exporting.</p></div>",
+            flash=message,
+            active_section="marketing",
+            user=user,
+        )
+    conn = db_connection()
+    try:
+        block_message = None if segment_key in BUSINESS_SEGMENT_KEYS else campaign_export_block_message_with_conn(conn)
+        audience_count = count_segment_rows_with_conn(conn, segment_key, segments)
+        campaign = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone() if campaign_id else None
+    finally:
+        conn.close()
+    rows = fetch_segment_rows(segment_key)[:8]
+    export_query = {"segment": segment_key}
+    if campaign and campaign["target_segment"] == segment_key:
+        export_query["campaign_id"] = str(campaign["id"])
+    sample_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(display_name(row))}</td>
+          <td>{'Present' if row['email'] else '<span class="muted">Missing</span>'}</td>
+          <td>{'Present' if row['phone'] else '<span class="muted">Missing</span>'}</td>
+          <td>{escape(display_timestamp(row['last_purchase_at'], include_time=False) if row['last_purchase_at'] else 'No purchase yet')}</td>
+        </tr>
+        """
+        for row in rows
+    ) or "<tr><td colspan='4'>No customers match this audience yet.</td></tr>"
+    campaign_note = ""
+    if campaign:
+        campaign_note = f"<li><strong>Campaign</strong><span>{escape(campaign['title'])}</span></li>"
+    block_html = ""
+    export_action = f"<a class='button' href='/marketing/export?{escape(urlencode(export_query))}'>Download CSV and log export</a>"
+    if block_message:
+        block_html = f"""
+        <div class="panel warning-panel">
+          <strong>Export blocked</strong>
+          <p>{escape(block_message)}</p>
+          <a class="button secondary small" href="/duplicates">Review duplicates</a>
+        </div>
+        """
+        export_action = "<button disabled>Export blocked</button>"
+    body = f"""
+    <section class="page-head">
+      <div>
+        <h2>Export Preview</h2>
+        <p>Confirm the audience before handing the CSV to Constant Contact, SMS, or the current outreach tool.</p>
+      </div>
+      <div class="button-row">
+        <a class="button secondary" href="/marketing#audiences">Back to audiences</a>
+        {export_action}
+      </div>
+    </section>
+    {block_html}
+    <section class="stats">
+      <article><span>Audience</span><strong>{escape(segment['label'])}</strong></article>
+      <article><span>Exportable rows</span><strong>{audience_count:,}</strong></article>
+      <article><span>Best channel</span><strong>{escape(segment['recommended_channel'])}</strong></article>
+      <article><span>Refresh behavior</span><strong>Tasks update</strong></article>
+    </section>
+    <section class="grid balanced-grid">
+      <div class="panel">
+        <h3>What this export does</h3>
+        <ul class="stacked-list compact-list">
+          {campaign_note}
+          <li><strong>File handoff</strong><span>Downloads first name, last name, email, phone, and date added.</span></li>
+          <li><strong>Audit trail</strong><span>Logs an audience exported event in outreach history.</span></li>
+          <li><strong>Task brain</strong><span>Refreshes recommendations after the CSV export completes.</span></li>
+          <li><strong>Guardrails</strong><span>Duplicate review can block unsafe exports when enabled.</span></li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Recommended next step</h3>
+        <p>{escape(segment['description'])}</p>
+        <p class="muted">After download, send through Seaview's current outreach tool, then return here and mark the campaign sent if this was a saved campaign.</p>
+      </div>
+    </section>
+    <div class="panel">
+      <h3>Sample rows</h3>
+      <p class="muted">PII is minimized in preview. The downloaded CSV contains the full export fields.</p>
+      <div class="scrollable-table">
+        <table>
+          <thead><tr><th>Customer</th><th>Email</th><th>Phone</th><th>Last purchase</th></tr></thead>
+          <tbody>{sample_rows}</tbody>
+        </table>
+      </div>
+    </div>
+    """
+    return base_layout("Export Preview", body, flash=message, active_section="marketing", user=user)
+
+
 def render_imports(
     message: str = "",
     summary_id: str = "",
     user: dict | None = None,
     ai_brief: dict | None = None,
     ai_error: str = "",
+    ai_saved: bool = False,
 ) -> bytes:
     settings = get_app_settings()
     conn = db_connection()
@@ -5516,7 +5760,12 @@ def render_imports(
     capture_gap = capture_gap_with_conn(conn)
     conn.close()
     import_summary = import_summary_from_row(summary_row)
+    saved_ai_brief = import_ai_brief_from_row(summary_row)
+    if ai_brief is None and saved_ai_brief:
+        ai_brief = saved_ai_brief
+        ai_saved = True
     summary_id_value = str(summary_row["id"]) if summary_row else ""
+    ai_saved_at = summary_row["ai_brief_created_at"] if summary_row and "ai_brief_created_at" in summary_row.keys() else ""
     ai_configured = ai_is_configured(get_setting)
     openai_model = model_from_settings(get_setting)
     openai_key_label = mask_secret(api_key_from_settings(get_setting))
@@ -5531,9 +5780,24 @@ def render_imports(
         for guide in import_source_guides()
     )
     history_rows = "".join(
-        f"<tr><td>{escape(display_timestamp(row['created_at'], include_time=False))}</td><td>{escape(source_system_label(row['source_system']))}</td><td>{row['rows_received']}</td><td>{row['customers_created']}</td><td>{row['customers_updated']}</td><td>{row['review_needed_rows'] or 0}</td><td>{escape(row['status'])}</td></tr>"
+        f"""
+        <tr>
+          <td>{escape(display_timestamp(row['created_at'], include_time=False))}</td>
+          <td>{escape(source_system_label(row['source_system']))}</td>
+          <td>{row['rows_received']}</td>
+          <td>{row['customers_created']}</td>
+          <td>{row['customers_updated']}</td>
+          <td>{row['review_needed_rows'] or 0}</td>
+          <td>{escape(row['status'])}</td>
+          <td>{
+              f"<a class='button secondary small' href='/imports/ai-brief?summary={row['id']}'>Open brief</a>"
+              if row['ai_brief_json']
+              else "<span class='muted'>Not saved</span>"
+          }</td>
+        </tr>
+        """
         for row in recent
-    ) or "<tr><td colspan='7'>No imports yet.</td></tr>"
+    ) or "<tr><td colspan='8'>No imports yet.</td></tr>"
     summary_html = ""
     if import_summary:
         net = import_summary.get("net_changes", {})
@@ -5724,6 +5988,18 @@ def render_imports(
                 for action in actions[:3]
                 if isinstance(action, dict)
             ) or "<p class='muted'>No AI actions were returned for this upload.</p>"
+            saved_status = (
+                f"Saved with import · {escape(display_timestamp(ai_saved_at, include_time=False))}"
+                if ai_saved and ai_saved_at
+                else "Saved with import"
+                if ai_saved
+                else "Preview only"
+            )
+            saved_note = (
+                "This brief is attached to the import history and can be reopened later."
+                if ai_saved
+                else "This version is a live preview. Save it if you want it attached to this weekly import."
+            )
             ai_panel_html = f"""
             <section class="import-intel-ai">
               <div class="import-intel-ai-head">
@@ -5731,9 +6007,10 @@ def render_imports(
                   <span class="eyebrow">AI Upload Readout</span>
                   <h4>{escape(str(ai_brief.get('headline', 'Latest upload brief')))}</h4>
                 </div>
-                <span class="status-pill">Live AI</span>
+                <span class="status-pill">{saved_status}</span>
               </div>
               <p>{escape(str(ai_brief.get('summary', 'AI translated the latest import into a tighter operating brief.')))}</p>
+              <p class="muted">{saved_note}</p>
               <div class="import-intel-columns">
                 <div class="import-intel-section">
                   <h4>What AI sees</h4>
@@ -5748,9 +6025,11 @@ def render_imports(
                 <strong>Chart readout</strong>
                 <ul class="import-intel-list compact-list">{chart_notes_html or '<li>The left chart shows file reality; the right chart shows where the next opportunity sits.</li>'}</ul>
               </div>
-              <form method="post" action="/imports/ai-brief" class="button-row">
+              <form method="post" action="/imports/ai-brief" class="button-row" data-ai-submit-form>
                 <input type="hidden" name="summary_id" value="{escape(summary_id_value)}">
-                <button type="submit" class="secondary small">Regenerate AI readout</button>
+                <button type="submit" name="brief_mode" value="save" class="small" data-loading-label="Saving AI brief...">Generate &amp; save new brief</button>
+                <button type="submit" name="brief_mode" value="preview" class="button secondary small" data-loading-label="Generating preview...">Preview only</button>
+                <span class="loading-note" data-ai-loading hidden>Generating brief from the latest import...</span>
               </form>
             </section>
             """
@@ -5764,11 +6043,13 @@ def render_imports(
                 </div>
                 <span class="status-pill">Ready · {escape(openai_model)}</span>
               </div>
-              <p class="muted">Generate a one-screen operating readout from the latest upload without leaving Imports.</p>
-              <form method="post" action="/imports/ai-brief" class="button-row">
+              <p class="muted">Generate a one-screen operating readout from the latest upload. Save it to this import if you want it attached to history.</p>
+              <form method="post" action="/imports/ai-brief" class="button-row" data-ai-submit-form>
                 <input type="hidden" name="summary_id" value="{escape(summary_id_value)}">
-                <button type="submit">Generate AI readout</button>
+                <button type="submit" name="brief_mode" value="save" data-loading-label="Saving AI brief...">Generate &amp; save AI readout</button>
+                <button type="submit" name="brief_mode" value="preview" class="button secondary small" data-loading-label="Generating preview...">Preview only</button>
                 <a class="button secondary small" href="/admin">AI settings</a>
+                <span class="loading-note" data-ai-loading hidden>Generating brief from the latest import...</span>
               </form>
             </section>
             """
@@ -5955,7 +6236,7 @@ def render_imports(
         <h3>Import history</h3>
         <div class="scrollable-table">
           <table>
-            <thead><tr><th>Date</th><th>Source</th><th>Rows</th><th>Created</th><th>Merged</th><th>Review</th><th>Status</th></tr></thead>
+            <thead><tr><th>Date</th><th>Source</th><th>Rows</th><th>Created</th><th>Merged</th><th>Review</th><th>Status</th><th>AI brief</th></tr></thead>
             <tbody>{history_rows}</tbody>
           </table>
         </div>
@@ -5964,6 +6245,23 @@ def render_imports(
 
     <!-- CLEANUP ENGINE TAB -->
     <div data-tab-panel="cleanup">
+      <section class="panel operating-brief" style="margin-bottom:1rem">
+        <span class="eyebrow">Guided data quality workflow</span>
+        <div class="operating-brief-grid">
+          <div>
+            <strong>1. Remove noise</strong>
+            <p>Internal, staff, and test records are automatically excluded from campaign exports.</p>
+          </div>
+          <div>
+            <strong>2. Fix reachability</strong>
+            <p>Phone and contact gaps show which customers cannot be used for SMS or email yet.</p>
+          </div>
+          <div>
+            <strong>3. Resolve trust risks</strong>
+            <p>Duplicate decisions protect the customer experience before CSV handoff.</p>
+          </div>
+        </div>
+      </section>
       <div class="panel cleanup-section" style="margin-bottom:1rem">
         <h3>Section A &mdash; Internal / Test Records (auto-excluded)</h3>
         <p class="muted">{freshline_cleanup['internal_total']:,} records are automatically excluded from all campaign exports.</p>
@@ -6013,7 +6311,7 @@ def render_imports(
 
 
 def render_import_preview(import_id: str, message: str = "", user: dict | None = None) -> bytes:
-    pending = PENDING_IMPORTS.get(import_id)
+    pending = load_pending_import(import_id)
     if not pending:
         return base_layout(
             "Import Preview",
@@ -6378,6 +6676,11 @@ def render_admin_dashboard(user: dict, message: str = "") -> bytes:
     openai_key_label = mask_secret(api_key_from_settings(get_setting))
     openai_model = model_from_settings(get_setting)
     ai_status = "Configured" if ai_is_configured(get_setting) else "Not configured"
+    conn = db_connection()
+    try:
+        last_task_refresh = latest_task_refresh_run_with_conn(conn)
+    finally:
+        conn.close()
 
     def mask(val: str) -> str:
         if not val:
@@ -6467,6 +6770,38 @@ def render_admin_dashboard(user: dict, message: str = "") -> bytes:
         <p class="muted">For production, prefer setting OPENAI_API_KEY in Render. The environment value overrides the stored admin setting.</p>
         <button type="submit">Save AI settings</button>
       </form>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h3>Task Recommendation Audit</h3>
+          <p class="muted">Shows the latest refresh that updated the existing dashboard task list.</p>
+        </div>
+        <form method="post" action="/tasks/refresh">
+          <button type="submit" class="button secondary small">Refresh now</button>
+        </form>
+      </div>
+      {(
+        f"<dl class='details'>"
+        f"<dt>Last refresh</dt><dd>{escape(display_timestamp(last_task_refresh['created_at']))}</dd>"
+        f"<dt>Trigger</dt><dd>{escape(last_task_refresh['trigger_event'])}</dd>"
+        f"<dt>Mode</dt><dd>{escape('AI' if last_task_refresh['used_ai'] else 'Rule fallback')}</dd>"
+        f"<dt>Created / updated</dt><dd>{last_task_refresh['tasks_created']} / {last_task_refresh['tasks_updated']}</dd>"
+        f"<dt>Error</dt><dd>{escape(last_task_refresh['error_message'] or 'None')}</dd>"
+        f"</dl>"
+      ) if last_task_refresh else "<p class='muted'>No task recommendation refresh has run yet.</p>"}
+    </div>
+
+    <div class="panel">
+      <h3>Production Handoff Notes</h3>
+      <ul class="stacked-list compact-list">
+        <li><strong>Health check</strong><span><a href="/healthz">/healthz</a> verifies the app can reach SQLite.</span></li>
+        <li><strong>SQLite location</strong><span>{escape(str(DB_PATH))}</span></li>
+        <li><strong>Backup routine</strong><span>On Render, periodically download or snapshot the persistent disk mounted at <code>/data</code>.</span></li>
+        <li><strong>Secrets</strong><span>Use Render environment variables for <code>SEAVIEW_SESSION_SECRET</code> and <code>OPENAI_API_KEY</code>; do not commit keys.</span></li>
+        <li><strong>Recovery</strong><span>Keep recent CSV imports available so the customer file can be rebuilt if needed.</span></li>
+      </ul>
     </div>
     """
     return base_layout("Admin Settings", body, flash=message, active_section="admin", user=user)
@@ -6730,6 +7065,19 @@ def ai_import_context(
     )
 
 
+def import_ai_brief_from_row(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    raw = row["ai_brief_json"] if "ai_brief_json" in row.keys() else ""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def render_ai_weekly_brief(brief: dict, user: dict | None, message: str = "") -> bytes:
     actions = brief.get("actions") if isinstance(brief.get("actions"), list) else []
     action_html = "".join(
@@ -6872,17 +7220,21 @@ from crm.db import db_connection, ensure_column, ensure_dirs, init_db, seed_demo
 from crm.imports import (  # noqa: E402
     analyze_import_rows,
     asset_url,
+    delete_pending_import,
     export_segment_csv,
     import_identity_details,
     import_row_decision_with_conn,
     import_row_is_identifiable,
     import_rows,
     import_source_guides,
+    load_pending_import,
     matched_preview_columns,
+    pop_pending_import,
     prune_pending_imports,
     public_capture_page,
     public_capture_pages,
     qr_page_items,
+    save_pending_import,
     save_upload,
     static_asset_bytes,
     value_for,
@@ -6939,7 +7291,15 @@ from crm.marketing import (  # noqa: E402
 )
 from crm.segments import segment_definitions  # noqa: E402
 from crm.settings_store import get_app_settings, save_app_settings  # noqa: E402
-from crm.tasks import complete_task, create_task, list_tasks, list_tasks_with_conn, task_counts_with_conn  # noqa: E402
+from crm.tasks import (  # noqa: E402
+    complete_task,
+    create_task,
+    latest_task_refresh_run_with_conn,
+    list_tasks,
+    list_tasks_with_conn,
+    refresh_task_recommendations,
+    task_counts_with_conn,
+)
 from crm.utils import (  # noqa: E402
     display_name,
     display_timestamp,
@@ -7074,6 +7434,28 @@ def ensure_runtime_schema() -> None:
                 UNIQUE(campaign_id, customer_id)
             );
 
+            CREATE TABLE IF NOT EXISTS task_refresh_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigger_event TEXT NOT NULL,
+                used_ai INTEGER NOT NULL DEFAULT 0,
+                used_fallback INTEGER NOT NULL DEFAULT 0,
+                tasks_created INTEGER NOT NULL DEFAULT 0,
+                tasks_updated INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_imports (
+                id TEXT PRIMARY KEY,
+                source_system TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                rows_json TEXT NOT NULL,
+                columns_json TEXT NOT NULL,
+                sample_rows_json TEXT NOT NULL,
+                analysis_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_file_growth_week
                 ON file_growth_snapshots(week_start DESC);
 
@@ -7085,9 +7467,23 @@ def ensure_runtime_schema() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
                 ON audit_log(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_task_refresh_runs_created_at
+                ON task_refresh_runs(created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_pending_imports_created_at
+                ON pending_imports(created_at);
             """
         )
         ensure_column(conn, "touchpoints", "scan_location", "TEXT")
+        ensure_column(conn, "tasks", "priority", "TEXT DEFAULT 'medium'")
+        ensure_column(conn, "tasks", "priority_score", "INTEGER DEFAULT 50")
+        ensure_column(conn, "tasks", "source", "TEXT DEFAULT 'manual'")
+        ensure_column(conn, "tasks", "ai_reason", "TEXT")
+        ensure_column(conn, "tasks", "related_metric", "TEXT")
+        ensure_column(conn, "tasks", "generated_from_event", "TEXT")
+        ensure_column(conn, "tasks", "refreshed_at", "TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_source_status ON tasks(source, status, priority_score)")
         user_count = conn.execute(
             "SELECT COUNT(*) AS c FROM staff_users"
         ).fetchone()["c"]
@@ -7282,6 +7678,8 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
     def requires_auth(self, path: str) -> bool:
         if path == "/login":
             return False
+        if path == "/healthz":
+            return False
         if path.startswith("/static/"):
             return False
         if path in PUBLIC_CAPTURE_VARIANTS:
@@ -7312,6 +7710,30 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                 self.respond_redirect("/")
                 return
             self.respond_html(render_login(message))
+            return
+        if parsed.path == "/healthz":
+            conn = db_connection()
+            try:
+                conn.execute("SELECT 1").fetchone()
+            except Exception as exc:
+                logger.exception("Health check failed")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                payload = json.dumps({"ok": False, "service": "seaview-crm", "error": str(exc)[:120]}).encode("utf-8")
+                self.respond_bytes(payload, "application/json; charset=utf-8", status=HTTPStatus.INTERNAL_SERVER_ERROR, headers={"Cache-Control": "no-store"})
+                return
+            conn.close()
+            payload = json.dumps(
+                {
+                    "ok": True,
+                    "service": "seaview-crm",
+                    "database": str(DB_PATH),
+                    "time": utc_now(),
+                }
+            ).encode("utf-8")
+            self.respond_bytes(payload, "application/json; charset=utf-8", headers={"Cache-Control": "no-store"})
             return
         if parsed.path in PUBLIC_CAPTURE_VARIANTS:
             self.respond_html(render_public_capture(parsed.path, message))
@@ -7357,7 +7779,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             ))
             return
         if parsed.path == "/tasks":
-            self.respond_html(render_tasks(message, user=user))
+            self.respond_html(render_tasks(message, user=user, filter_key=params.get("filter", ["all"])[0]))
             return
         if parsed.path == "/customers/new":
             self.respond_html(render_customer_form(message, user=user))
@@ -7404,6 +7826,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                     campaign_id = None
             payload = export_segment_csv(segment_key)
             log_segment_export(segment_key, campaign_id)
+            refresh_task_recommendations("campaign_exported")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
@@ -7417,6 +7840,20 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", f"attachment; filename={export_name}")
             self.end_headers()
             self.wfile.write(payload)
+            return
+        if parsed.path == "/marketing/export/preview":
+            segment_key = params.get("segment", [""])[0]
+            if segment_key not in segment_definitions():
+                self.respond_not_found()
+                return
+            campaign_id = None
+            campaign_id_value = params.get("campaign_id", [""])[0]
+            if campaign_id_value:
+                try:
+                    campaign_id = int(campaign_id_value)
+                except ValueError:
+                    campaign_id = None
+            self.respond_html(render_campaign_export_preview(segment_key, campaign_id, message, user=user))
             return
         if parsed.path == "/marketing":
             conn = db_connection()
@@ -7444,6 +7881,9 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/settings":
             self.respond_html(render_settings(message, user=user))
+            return
+        if parsed.path == "/imports/ai-brief":
+            self.respond_html(render_imports(message, params.get("summary", [""])[0], user=user))
             return
         if parsed.path == "/imports":
             self.respond_html(render_imports(message, params.get("summary", [""])[0], user=user))
@@ -7675,6 +8115,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                 if result["error"]:
                     payload = json.dumps({"success": False, "error": result["error"]}).encode("utf-8")
                 else:
+                    refresh_task_recommendations("public_capture_submitted")
                     payload = json.dumps({"success": True}).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -7685,6 +8126,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             if result["error"]:
                 self.respond_redirect(f"{self.path}?{message_query(result['error'])}")
                 return
+            refresh_task_recommendations("public_capture_submitted")
             if result["result_state"] == "new_customer":
                 message_text = "Thanks. You are now on Seaview's update list."
             elif result["result_state"] == "existing_customer":
@@ -8025,6 +8467,122 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             self.respond_redirect("/capture?" + message_query("AI capture page copy updated."))
             return
 
+        if self.path == "/imports/ai-settings":
+            if not user or user.get("role") != "admin":
+                self.respond_redirect("/imports?" + message_query("Admin access required to save AI settings."))
+                return
+            fields = self.parse_urlencoded()
+            api_key = fields.get("openai_api_key", "").strip()
+            model = fields.get("openai_model", "").strip()
+            conn = db_connection()
+            try:
+                if api_key:
+                    set_setting("openai_api_key", api_key)
+                if model:
+                    set_setting("openai_model", model)
+                log_audit(
+                    conn,
+                    user["id"],
+                    user["username"],
+                    "imports_ai_settings_updated",
+                    "Updated OpenAI settings from Imports",
+                    self.client_address[0] if getattr(self, "client_address", None) else "",
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self.respond_redirect("/imports?" + message_query("AI settings saved."))
+            return
+
+        if self.path == "/imports/ai-brief":
+            if not ai_is_configured(get_setting):
+                self.respond_redirect("/imports?" + message_query("Add an OpenAI API key before generating an import brief."))
+                return
+            fields = self.parse_urlencoded()
+            summary_id = fields.get("summary_id", "").strip()
+            brief_mode = fields.get("brief_mode", "save").strip().lower()
+            if brief_mode not in {"save", "preview"}:
+                brief_mode = "save"
+            conn = db_connection()
+            try:
+                summary_row = None
+                if summary_id.isdigit():
+                    summary_row = conn.execute("SELECT * FROM import_runs WHERE id = ?", (int(summary_id),)).fetchone()
+                if not summary_row:
+                    summary_row = conn.execute(
+                        """
+                        SELECT *
+                        FROM import_runs
+                        WHERE COALESCE(intelligence_summary, '') <> ''
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                import_summary = import_summary_from_row(summary_row)
+                if not import_summary:
+                    self.respond_redirect("/imports?" + message_query("No import intelligence summary is available yet."))
+                    return
+                summary_id = str(summary_row["id"])
+                context = ai_import_context(conn, import_summary, summary_row)
+            finally:
+                conn.close()
+            try:
+                brief = generate_import_brief(
+                    api_key=api_key_from_settings(get_setting),
+                    model=model_from_settings(get_setting),
+                    context=context,
+                )
+            except AIError as exc:
+                self.respond_html(
+                    render_imports(
+                        summary_id=summary_id,
+                        user=user,
+                        ai_error=f"AI import brief failed: {str(exc)[:180]}",
+                    )
+                )
+                return
+            if brief_mode == "save":
+                conn = db_connection()
+                try:
+                    conn.execute(
+                        """
+                        UPDATE import_runs
+                        SET ai_brief_json = ?, ai_brief_created_at = ?
+                        WHERE id = ?
+                        """,
+                        (json.dumps(brief), utc_now(), int(summary_id)),
+                    )
+                    log_audit(
+                        conn,
+                        user["id"],
+                        user["username"],
+                        "ai_import_brief_saved",
+                        f"Saved AI brief for import {summary_id}",
+                        self.client_address[0] if getattr(self, "client_address", None) else "",
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                self.respond_redirect(
+                    f"/imports/ai-brief?summary={summary_id}&" + message_query("AI brief saved to import history.")
+                )
+                return
+            conn = db_connection()
+            try:
+                log_audit(
+                    conn,
+                    user["id"],
+                    user["username"],
+                    "ai_import_brief_generated",
+                    f"Previewed AI brief for import {summary_id or 'latest'}",
+                    self.client_address[0] if getattr(self, "client_address", None) else "",
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self.respond_html(render_imports(summary_id=summary_id, user=user, ai_brief=brief, ai_saved=False))
+            return
+
         if self.path == "/imports":
             self.handle_import_upload()
             return
@@ -8032,6 +8590,10 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             fields = self.parse_urlencoded()
             save_app_settings(fields)
             self.respond_redirect("/settings?" + message_query("Settings updated."))
+            return
+        if self.path == "/tasks/refresh":
+            summary = refresh_task_recommendations("manual_refresh")
+            self.respond_redirect("/tasks?" + message_query(task_refresh_message(summary)))
             return
         if self.path == "/tasks":
             fields = self.parse_urlencoded()
@@ -8139,7 +8701,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
         if self.path == "/imports/confirm":
             fields = self.parse_urlencoded()
             import_id = fields.get("import_id", "")
-            pending = PENDING_IMPORTS.get(import_id)
+            pending = load_pending_import(import_id)
             if not pending:
                 self.respond_redirect("/imports?" + message_query("Import preview expired. Upload the file again."))
                 return
@@ -8147,7 +8709,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             if not analysis["can_import"]:
                 self.respond_redirect(f"/imports/preview/{import_id}?" + message_query("This file needs usable identity columns before it can be imported."))
                 return
-            pending = PENDING_IMPORTS.pop(import_id, None)
+            pending = pop_pending_import(import_id)
             if not pending:
                 self.respond_redirect("/imports?" + message_query("Import preview expired. Upload the file again."))
                 return
@@ -8168,6 +8730,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                 conn.commit()
             finally:
                 conn.close()
+            refresh_task_recommendations("import_completed")
             message = (
                 f"Imported {result['rows_received']} rows. Created {result['customers_created']} customers, "
                 f"merged {result['customers_updated']}, sent {result['review_needed_rows']} to review, "
@@ -8177,7 +8740,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/imports/cancel":
             fields = self.parse_urlencoded()
-            PENDING_IMPORTS.pop(fields.get("import_id", ""), None)
+            delete_pending_import(fields.get("import_id", ""))
             self.respond_redirect("/imports?" + message_query("Import canceled."))
             return
         if self.path == "/marketing/campaigns":
@@ -8267,6 +8830,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             if result["error"]:
                 self.respond_redirect(f"/marketing?{message_query(result['error'])}")
                 return
+            refresh_task_recommendations("internal_capture_submitted")
             if result["result_state"] == "new_customer":
                 message_text = "New customer created from this touchpoint."
             elif result["result_state"] == "existing_customer":
@@ -8328,6 +8892,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             if result["error"]:
                 self.respond_redirect(f"/capture?{message_query(result['error'])}")
                 return
+            refresh_task_recommendations("internal_capture_submitted")
             if result["result_state"] == "new_customer":
                 message_text = "New customer created from this capture."
             elif result["result_state"] == "existing_customer":
@@ -8382,15 +8947,14 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
         analysis = analyze_import_rows(source_system, rows)
         filename = save_upload(filename, file_part["content"])
         import_id = uuid.uuid4().hex
-        PENDING_IMPORTS[import_id] = {
-            "source_system": source_system,
-            "filename": filename,
-            "rows": rows,
-            "columns": analysis["columns"],
-            "sample_rows": preview_rows(rows),
-            "analysis": analysis,
-            "created_at_ts": time.time(),
-        }
+        save_pending_import(
+            import_id,
+            source_system=source_system,
+            filename=filename,
+            rows=rows,
+            analysis=analysis,
+            sample_rows=preview_rows(rows),
+        )
         self.respond_redirect(f"/imports/preview/{import_id}")
 
     def parse_multipart(self) -> dict:
@@ -8448,7 +9012,19 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def respond_not_found(self) -> None:
-        self.respond_html(base_layout("Not Found", "<div class='panel'><h2>Not found</h2></div>"), status=HTTPStatus.NOT_FOUND)
+        self.respond_html(
+            base_layout(
+                "Not Found",
+                """
+                <div class='panel'>
+                  <h2>Page not found</h2>
+                  <p class='muted'>That page is not part of the Seaview CRM workspace.</p>
+                  <a class='button secondary small' href='/'>Back to dashboard</a>
+                </div>
+                """,
+            ),
+            status=HTTPStatus.NOT_FOUND,
+        )
 
     def log_message(self, format: str, *args) -> None:
         return

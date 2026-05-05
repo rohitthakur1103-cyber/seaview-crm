@@ -1,10 +1,11 @@
 import csv
 import io
+import json
 import logging
 import sqlite3
 import time
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from crm.config import (
@@ -22,6 +23,7 @@ from crm.config import (
 from crm.utils import (
     normalize_header,
     normalize_phone,
+    parse_datetime,
     parse_csv_bytes,
     preview_columns,
     preview_rows,
@@ -36,6 +38,109 @@ from crm.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _pending_import_cutoff(now: float | None = None) -> str:
+    cutoff_ts = (now or time.time()) - PENDING_IMPORT_TTL_SECONDS
+    return datetime.fromtimestamp(cutoff_ts, tz=UTC).replace(microsecond=0).isoformat()
+
+
+def save_pending_import(
+    import_id: str,
+    *,
+    source_system: str,
+    filename: str,
+    rows: list[dict],
+    analysis: dict,
+    columns: list[str] | None = None,
+    sample_rows: list[dict] | None = None,
+) -> None:
+    payload = {
+        "source_system": source_system,
+        "filename": filename,
+        "rows": rows,
+        "columns": columns or analysis.get("columns") or preview_columns(rows),
+        "sample_rows": sample_rows or preview_rows(rows),
+        "analysis": analysis,
+        "created_at_ts": time.time(),
+    }
+    PENDING_IMPORTS[import_id] = payload
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO pending_imports (
+                id, source_system, filename, rows_json, columns_json,
+                sample_rows_json, analysis_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                import_id,
+                source_system,
+                filename,
+                json.dumps(rows, separators=(",", ":"), sort_keys=True),
+                json.dumps(payload["columns"], separators=(",", ":"), sort_keys=True),
+                json.dumps(payload["sample_rows"], separators=(",", ":"), sort_keys=True),
+                json.dumps(analysis, separators=(",", ":"), sort_keys=True),
+                utc_now(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_pending_import(import_id: str) -> dict | None:
+    cached = PENDING_IMPORTS.get(import_id)
+    if cached:
+        return cached
+    prune_pending_imports()
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        row = conn.execute("SELECT * FROM pending_imports WHERE id = ?", (import_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    try:
+        payload = {
+            "source_system": row["source_system"],
+            "filename": row["filename"],
+            "rows": json.loads(row["rows_json"]),
+            "columns": json.loads(row["columns_json"]),
+            "sample_rows": json.loads(row["sample_rows_json"]),
+            "analysis": json.loads(row["analysis_json"]),
+            "created_at_ts": parse_datetime(row["created_at"]).timestamp() if parse_datetime(row["created_at"]) else time.time(),
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        delete_pending_import(import_id)
+        return None
+    PENDING_IMPORTS[import_id] = payload
+    return payload
+
+
+def delete_pending_import(import_id: str) -> None:
+    PENDING_IMPORTS.pop(import_id, None)
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        conn.execute("DELETE FROM pending_imports WHERE id = ?", (import_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def pop_pending_import(import_id: str) -> dict | None:
+    payload = load_pending_import(import_id)
+    if not payload:
+        return None
+    delete_pending_import(import_id)
+    return payload
 
 def value_for(row: dict, logical_name: str) -> str:
     aliases = ALIASES[logical_name]
@@ -495,6 +600,14 @@ def prune_pending_imports(now: float | None = None) -> None:
     ]
     for import_id in expired_ids:
         PENDING_IMPORTS.pop(import_id, None)
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        conn.execute("DELETE FROM pending_imports WHERE created_at < ?", (_pending_import_cutoff(now),))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ── Capture page helpers ──────────────────────────────────────────────────────

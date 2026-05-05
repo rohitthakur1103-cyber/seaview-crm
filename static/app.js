@@ -296,4 +296,32 @@ document.addEventListener("DOMContentLoaded", () => {
       setTimeout(() => toast.classList.add("hidden"), 220);
     }, 3000);
   }
+
+  // 7. AI SUBMIT LOADING STATE
+  document.querySelectorAll("[data-ai-submit-form]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      const submitter = event.submitter;
+      const loadingNote = form.querySelector("[data-ai-loading]");
+      const buttons = form.querySelectorAll("button, a.button");
+
+      buttons.forEach((button) => {
+        if (button.tagName === "BUTTON") {
+          button.disabled = true;
+        }
+        button.classList.add("is-disabled");
+      });
+
+      if (submitter && submitter.tagName === "BUTTON") {
+        const loadingLabel =
+          submitter.getAttribute("data-loading-label") || "Generating...";
+        submitter.dataset.originalLabel = submitter.textContent;
+        submitter.textContent = loadingLabel;
+        submitter.classList.add("is-loading");
+      }
+
+      if (loadingNote) {
+        loadingNote.hidden = false;
+      }
+    });
+  });
 });

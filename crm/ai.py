@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any
 
+import certifi
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -74,7 +76,7 @@ def call_openai_json(
         {
             "model": model,
             "instructions": instructions,
-            "input": prompt,
+            "input": f"Return valid JSON only.\n\n{prompt}",
             "text": {"format": {"type": "json_object"}},
             "max_output_tokens": max_output_tokens,
         }
@@ -89,7 +91,8 @@ def call_openai_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(request, timeout=timeout, context=ssl_context) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -153,13 +156,22 @@ def generate_capture_copy(*, api_key: str, model: str, context: dict[str, Any]) 
 
 def generate_import_brief(*, api_key: str, model: str, context: dict[str, Any]) -> dict[str, Any]:
     instructions = (
-        "You are Seaview Crab Company's CRM import analyst. "
+        "You are Seaview Crab Company's customer-file operator. "
+        "Think like a practical seafood owner or floor lead reviewing this week's upload before weekend service. "
         "Use only the provided import metrics and CRM context. "
-        "Be concrete, operational, and concise. "
+        "Sound operational, local, and specific to seafood retail and in-store capture. "
+        "Talk about reachable guests, weekend specials, text list growth, counter capture, duplicate cleanup, and who staff can market to right now. "
+        "Do not use generic SaaS or corporate CRM language. Do not say engagement, leverage, optimize, ecosystem, funnel, or synergy. "
+        "Keep the tone direct, grounded, and useful for a crab shack operator. "
+        "Only use exact numeric claims that appear in the provided latest import data. Do not infer counts from example lists. "
+        "If the latest import source_type is clover, focus on capture gap, reachable Freshline audience, and checkout capture. "
+        "If the latest import source_type is freshline, focus on cleanup, campaign-ready audience, and exportable lists. "
+        "Do not mention duplicate cleanup or invalid phone counts unless those counts are explicitly present in latest_import.source_metrics.cleanup. "
         "Return JSON only with keys: headline, summary, takeaways, actions, chart_notes. "
         "takeaways must be a list of exactly 3 short strings. "
         "actions must be a list of exactly 3 objects with keys: title, reason, cta. "
-        "chart_notes must be a list of exactly 2 short strings that explain what the charts mean."
+        "chart_notes must be a list of exactly 2 short strings that explain what the charts mean. "
+        "Every action should sound like something staff can do this week."
     )
     prompt = json.dumps(context, indent=2, sort_keys=True)
     return call_openai_json(

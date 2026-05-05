@@ -75,8 +75,21 @@ def init_db() -> None:
             skipped_rows INTEGER NOT NULL DEFAULT 0,
             purchase_events_created INTEGER NOT NULL,
             intelligence_summary TEXT,
+            ai_brief_json TEXT,
+            ai_brief_created_at TEXT,
             status TEXT NOT NULL,
             error_message TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pending_imports (
+            id TEXT PRIMARY KEY,
+            source_system TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            rows_json TEXT NOT NULL,
+            columns_json TEXT NOT NULL,
+            sample_rows_json TEXT NOT NULL,
+            analysis_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
 
@@ -126,9 +139,27 @@ def init_db() -> None:
             task_type TEXT NOT NULL,
             due_at TEXT,
             status TEXT NOT NULL DEFAULT 'open',
+            priority TEXT DEFAULT 'medium',
+            priority_score INTEGER DEFAULT 50,
+            source TEXT DEFAULT 'manual',
+            ai_reason TEXT,
+            related_metric TEXT,
+            generated_from_event TEXT,
+            refreshed_at TEXT,
             created_at TEXT NOT NULL,
             completed_at TEXT,
             FOREIGN KEY (customer_id) REFERENCES customers(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_refresh_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger_event TEXT NOT NULL,
+            used_ai INTEGER NOT NULL DEFAULT 0,
+            used_fallback INTEGER NOT NULL DEFAULT 0,
+            tasks_created INTEGER NOT NULL DEFAULT 0,
+            tasks_updated INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS customer_notes (
@@ -177,11 +208,13 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_touchpoints_customer_created_at ON touchpoints(customer_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_touchpoints_created_at ON touchpoints(created_at);
         CREATE INDEX IF NOT EXISTS idx_import_runs_created_at ON import_runs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_pending_imports_created_at ON pending_imports(created_at);
         CREATE INDEX IF NOT EXISTS idx_campaigns_status_scheduled_for ON campaigns(status, scheduled_for, created_at);
         CREATE INDEX IF NOT EXISTS idx_outreach_history_created_at ON outreach_history(created_at);
         CREATE INDEX IF NOT EXISTS idx_outreach_history_campaign_id ON outreach_history(campaign_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_tasks_status_due_at ON tasks(status, due_at, created_at);
         CREATE INDEX IF NOT EXISTS idx_tasks_customer_id ON tasks(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_task_refresh_runs_created_at ON task_refresh_runs(created_at);
         CREATE INDEX IF NOT EXISTS idx_customer_notes_customer_id ON customer_notes(customer_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_duplicate_reviews_pair ON duplicate_reviews(customer_low_id, customer_high_id);
         """
@@ -195,6 +228,16 @@ def init_db() -> None:
     ensure_column(conn, "import_runs", "review_needed_rows", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "import_runs", "skipped_rows", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "import_runs", "intelligence_summary", "TEXT")
+    ensure_column(conn, "import_runs", "ai_brief_json", "TEXT")
+    ensure_column(conn, "import_runs", "ai_brief_created_at", "TEXT")
+    ensure_column(conn, "tasks", "priority", "TEXT DEFAULT 'medium'")
+    ensure_column(conn, "tasks", "priority_score", "INTEGER DEFAULT 50")
+    ensure_column(conn, "tasks", "source", "TEXT DEFAULT 'manual'")
+    ensure_column(conn, "tasks", "ai_reason", "TEXT")
+    ensure_column(conn, "tasks", "related_metric", "TEXT")
+    ensure_column(conn, "tasks", "generated_from_event", "TEXT")
+    ensure_column(conn, "tasks", "refreshed_at", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_source_status ON tasks(source, status, priority_score)")
     ensure_column(conn, "app_settings", "preferred_primary_data_source", "TEXT")
     ensure_column(conn, "app_settings", "default_capture_cta", "TEXT")
     ensure_column(
@@ -290,6 +333,55 @@ def seed_demo_data() -> None:
                 "Imported from an older spreadsheet that had not been reused.",
                 0, None, "email", 0, "legacy_csv", None, now, now,
             ),
+            (
+                "FL-4004", "freshline_customer_export", "Evelyn", "Brooks",
+                "evelyn.brooks@example.com", "9105550188", "Wilmington", "NC",
+                "recent buyer, crab boil",
+                "Bought weekend boil trays and opted into weekly specials.",
+                188.75, "2026-04-24T17:45:00+00:00", "email", 1, "freshline_customer_export", None, now, now,
+            ),
+            (
+                "FL-4005", "freshline_customer_export", "Marcus", "Reed",
+                "marcus.reed@example.com", "", "Wrightsville Beach", "NC",
+                "lapsed, family packs",
+                "Used to buy family packs but has not purchased recently.",
+                274.20, "2025-11-20T12:00:00+00:00", "email", 1, "freshline_customer_export", None, now, now,
+            ),
+            (
+                "QR-5006", "touchpoint_capture", "Nina", "Patel",
+                "nina.patel@example.com", "9105550199", "Wilmington", "NC",
+                "captured lead, qr counter, shrimp",
+                "Joined from the counter QR after asking about shrimp specials.",
+                0, None, "either", 1, "in_store_qr", None, now, now,
+            ),
+            (
+                "QR-5007", "touchpoint_capture", "Owen", "Miles",
+                "", "9105550200", "Leland", "NC",
+                "captured lead, receipt qr",
+                "Receipt QR signup; prefers text updates.",
+                0, None, "sms", 1, "receipt_qr", None, now, now,
+            ),
+            (
+                "CL-6008", "clover", "Harbor", "Cafe",
+                "orders@harborcafe.example.com", "9105550211", "Carolina Beach", "NC",
+                "wholesale, vip, restaurant",
+                "Potential wholesale account for oysters and crab trays.",
+                2310.40, "2026-04-15T10:30:00+00:00", "either", 1, "clover", None, now, now,
+            ),
+            (
+                "LEG-7009", "legacy_csv", "Sam", "Taylor",
+                "", "", "Wilmington", "NC",
+                "missing contact, event lead",
+                "Name captured at an event but no usable contact route yet.",
+                0, None, None, 0, "event_booth", None, now, now,
+            ),
+            (
+                "DUP-8010", "legacy_csv", "James", "Carter",
+                "james.carter.alt@example.com", "9105550144", "Leland", "NC",
+                "possible duplicate, wholesale",
+                "Alternate export row that should be reviewed against the wholesale James Carter record.",
+                120.00, "2026-04-02T09:15:00+00:00", "either", 1, "legacy_csv", None, now, now,
+            ),
         ]
         conn.executemany(
             """
@@ -315,6 +407,9 @@ def seed_demo_data() -> None:
             [
                 (customer_lookup["maria@example.com"], "clover", "Blue Crab Special", 2, 78.0, "2026-03-18T14:30:00", now),
                 (customer_lookup["jcarter@example.com"], "clover", "Wholesale Oyster Tray", 10, 450.0, "2026-03-20T09:15:00", now),
+                (customer_lookup["evelyn.brooks@example.com"], "freshline_customer_export", "Weekend Crab Boil", 1, 188.75, "2026-04-24T17:45:00+00:00", now),
+                (customer_lookup["marcus.reed@example.com"], "freshline_customer_export", "Family Shrimp Pack", 2, 96.00, "2025-11-20T12:00:00+00:00", now),
+                (customer_lookup["orders@harborcafe.example.com"], "clover", "Wholesale Oyster Tray", 8, 620.00, "2026-04-15T10:30:00+00:00", now),
             ],
         )
         conn.execute(
@@ -353,8 +448,45 @@ def seed_demo_data() -> None:
                     "Requested pricing and seasonal inventory updates for wholesale trays.",
                     "either", 1, 1, now,
                 ),
+                (
+                    customer_lookup["nina.patel@example.com"],
+                    "in_store_qr",
+                    "Counter QR signup for shrimp and crab specials.",
+                    "either", 1, 1, now,
+                ),
+                (
+                    customer_lookup[""],
+                    "receipt_qr",
+                    "Receipt QR signup for text updates.",
+                    "sms", 0, 1, now,
+                ) if "" in customer_lookup else (
+                    customer_lookup["nina.patel@example.com"],
+                    "receipt_qr",
+                    "Receipt QR test capture for demo reporting.",
+                    "sms", 0, 1, now,
+                ),
             ],
         )
+
+    duplicate_count = conn.execute("SELECT COUNT(*) AS count FROM duplicate_reviews").fetchone()["count"]
+    if not duplicate_count:
+        james = conn.execute("SELECT id FROM customers WHERE email = 'jcarter@example.com'").fetchone()
+        james_alt = conn.execute("SELECT id FROM customers WHERE email = 'james.carter.alt@example.com'").fetchone()
+        if james and james_alt:
+            low_id, high_id = sorted([james["id"], james_alt["id"]])
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO duplicate_reviews (
+                    customer_low_id, customer_high_id, primary_customer_id, secondary_customer_id,
+                    decision, reason, match_value, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    low_id, high_id, james["id"], james_alt["id"],
+                    "Same wholesale contact appears in Clover and legacy export.",
+                    "James Carter · Leland NC", now,
+                ),
+            )
 
     campaign_count = conn.execute("SELECT COUNT(*) AS count FROM campaigns").fetchone()["count"]
     if not campaign_count:
