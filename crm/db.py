@@ -198,8 +198,18 @@ def init_db() -> None:
         );
 
         CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
+        CREATE INDEX IF NOT EXISTS idx_customers_lower_email ON customers(lower(email));
+        CREATE INDEX IF NOT EXISTS idx_customers_source_lower_email ON customers(source_system, lower(email));
         CREATE INDEX IF NOT EXISTS idx_customers_source_external_id ON customers(source_system, external_id);
         CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+        CREATE INDEX IF NOT EXISTS idx_customers_name_location
+            ON customers(
+                lower(trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))),
+                lower(COALESCE(city, '')),
+                lower(COALESCE(state, '')),
+                updated_at DESC,
+                id DESC
+            );
         CREATE INDEX IF NOT EXISTS idx_customers_updated_at ON customers(updated_at);
         CREATE INDEX IF NOT EXISTS idx_customers_last_purchase_at ON customers(last_purchase_at);
         CREATE INDEX IF NOT EXISTS idx_purchase_events_customer_id ON purchase_events(customer_id);

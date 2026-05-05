@@ -106,9 +106,15 @@ def call_openai_json(
 def generate_weekly_brief(*, api_key: str, model: str, context: dict[str, Any]) -> dict[str, Any]:
     instructions = (
         "You are Seaview Crab Company's CRM operating assistant. "
-        "Use only the provided CRM metrics. Be specific, practical, and business-focused. "
-        "Return JSON only with keys: headline, summary, actions, risks. "
-        "actions must be a list of 4 objects with title, reason, cta."
+        "Write for a restaurant owner or manager reviewing the weekly customer file, not for a software team. "
+        "Use only the provided CRM metrics and never invent counts. Be specific, practical, and business-focused. "
+        "Return JSON only with keys: headline, executive_summary, key_metrics, sections, actions. "
+        "headline must be under 90 characters. executive_summary must be 2-4 short sentences. "
+        "key_metrics must be 3-6 objects with keys: label, value, context, tone. "
+        "sections must be an object with keys: key_customer_insights, data_quality_issues, campaign_opportunities, risks_or_missing_information. "
+        "Each section value must be a list of 2-5 concise, scan-ready strings. "
+        "actions must be 3-5 objects with keys: title, reason, cta, owner, timing. "
+        "Avoid raw markdown, generic SaaS language, hype, and long paragraphs."
     )
     prompt = json.dumps(context, indent=2, sort_keys=True)
     return call_openai_json(
@@ -116,7 +122,7 @@ def generate_weekly_brief(*, api_key: str, model: str, context: dict[str, Any]) 
         model=model,
         instructions=instructions,
         prompt=prompt,
-        max_output_tokens=900,
+        max_output_tokens=1600,
     )
 
 

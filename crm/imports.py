@@ -39,6 +39,11 @@ from crm.utils import (
 
 logger = logging.getLogger(__name__)
 
+ALIAS_TO_FIELDS: dict[str, tuple[str, ...]] = {}
+for _field_name, _aliases in ALIASES.items():
+    for _alias in _aliases:
+        ALIAS_TO_FIELDS[_alias] = (*ALIAS_TO_FIELDS.get(_alias, ()), _field_name)
+
 
 def _pending_import_cutoff(now: float | None = None) -> str:
     cutoff_ts = (now or time.time()) - PENDING_IMPORT_TTL_SECONDS
@@ -80,10 +85,10 @@ def save_pending_import(
                 import_id,
                 source_system,
                 filename,
-                json.dumps(rows, separators=(",", ":"), sort_keys=True),
-                json.dumps(payload["columns"], separators=(",", ":"), sort_keys=True),
-                json.dumps(payload["sample_rows"], separators=(",", ":"), sort_keys=True),
-                json.dumps(analysis, separators=(",", ":"), sort_keys=True),
+                json.dumps(rows, separators=(",", ":")),
+                json.dumps(payload["columns"], separators=(",", ":")),
+                json.dumps(payload["sample_rows"], separators=(",", ":")),
+                json.dumps(analysis, separators=(",", ":")),
                 utc_now(),
             ),
         )
@@ -157,39 +162,58 @@ def matched_preview_columns(columns: list[str], logical_name: str) -> list[str]:
 
 # ── Import row analysis ───────────────────────────────────────────────────────
 
-def import_row_is_identifiable(row: dict) -> bool:
-    first_name = value_for(row, "first_name")
-    last_name = value_for(row, "last_name")
-    full_name = value_for(row, "full_name")
+def import_row_values(row: dict) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key, raw_value in row.items():
+        if raw_value is None:
+            continue
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        for logical_name in ALIAS_TO_FIELDS.get(normalize_header(key), ()):
+            values.setdefault(logical_name, value)
+    return values
+
+
+def import_values_are_identifiable(values: dict[str, str]) -> bool:
+    first_name = values.get("first_name", "")
+    last_name = values.get("last_name", "")
     return any([
-        value_for(row, "external_id"),
-        value_for(row, "email"),
-        value_for(row, "phone"),
-        full_name,
+        values.get("external_id"),
+        values.get("email"),
+        values.get("phone"),
+        values.get("full_name"),
         first_name and last_name,
     ])
 
 
-def import_identity_details(row: dict) -> dict:
-    first_name = value_for(row, "first_name")
-    last_name = value_for(row, "last_name")
+def import_identity_from_values(values: dict[str, str]) -> dict:
+    first_name = values.get("first_name", "")
+    last_name = values.get("last_name", "")
     if not first_name and not last_name:
-        first_name, last_name = split_name(value_for(row, "full_name"))
+        first_name, last_name = split_name(values.get("full_name", ""))
     return {
-        "external_id": value_for(row, "external_id"),
+        "external_id": values.get("external_id", ""),
         "first_name": first_name.strip(),
         "last_name": last_name.strip(),
-        "email": value_for(row, "email").strip().lower(),
-        "phone": normalize_phone(value_for(row, "phone").strip()),
-        "city": value_for(row, "city").strip(),
-        "state": value_for(row, "state").strip(),
+        "email": values.get("email", "").strip().lower(),
+        "phone": normalize_phone(values.get("phone", "").strip()),
+        "city": values.get("city", "").strip(),
+        "state": values.get("state", "").strip(),
     }
 
 
+def import_row_is_identifiable(row: dict) -> bool:
+    return import_values_are_identifiable(import_row_values(row))
+
+
+def import_identity_details(row: dict) -> dict:
+    return import_identity_from_values(import_row_values(row))
+
+
 def import_row_has_usable_contact(row: dict) -> bool:
-    email = value_for(row, "email").strip().lower()
-    phone = normalize_phone(value_for(row, "phone").strip())
-    return bool((email and validate_email(email)) or len(phone) == 10)
+    identity = import_identity_details(row)
+    return bool((identity["email"] and validate_email(identity["email"])) or len(identity["phone"]) == 10)
 
 
 def import_row_has_name(row: dict) -> bool:
@@ -198,7 +222,185 @@ def import_row_has_name(row: dict) -> bool:
 
 
 def import_row_marketing_allowed(row: dict) -> bool:
-    return bool(to_bool(value_for(row, "marketing_consent")))
+    return bool(to_bool(import_row_values(row).get("marketing_consent", "")))
+
+
+def compile_import_row(row: dict) -> dict:
+    values = import_row_values(row)
+    identity = import_identity_from_values(values)
+    email = identity["email"]
+    phone = identity["phone"]
+    has_usable_contact = bool((email and validate_email(email)) or len(phone) == 10)
+    return {
+        "values": values,
+        "identity": identity,
+        "identifiable": import_values_are_identifiable(values),
+        "has_usable_contact": has_usable_contact,
+        "has_name": bool(identity["first_name"] or identity["last_name"]),
+        "marketing_allowed": bool(to_bool(values.get("marketing_consent", ""))),
+        "valid_email": email if email and validate_email(email) else "",
+        "valid_phone": phone if len(phone) == 10 else "",
+        "has_purchase": bool(values.get("item_name") or values.get("order_total") or values.get("purchased_at")),
+    }
+
+
+def _row_value(row: sqlite3.Row | dict, key: str, default=None):
+    if isinstance(row, sqlite3.Row):
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
+    return row.get(key, default)
+
+
+def _name_location_key(identity: dict) -> tuple[str, str, str] | None:
+    normalized_name = " ".join(
+        part for part in [
+            (identity.get("first_name") or "").lower(),
+            (identity.get("last_name") or "").lower(),
+        ]
+        if part
+    ).strip()
+    city = (identity.get("city") or "").lower()
+    state = (identity.get("state") or "").lower()
+    if normalized_name and (city or state):
+        return normalized_name, city, state
+    return None
+
+
+def _minimal_customer_from_identity(customer_id: int, identity: dict, marketing_consent: int = 0) -> dict:
+    return {
+        "id": customer_id,
+        "external_id": identity.get("external_id") or None,
+        "source_system": identity.get("source_system") or "",
+        "first_name": identity.get("first_name") or None,
+        "last_name": identity.get("last_name") or None,
+        "email": identity.get("email") or None,
+        "phone": identity.get("phone") or None,
+        "city": identity.get("city") or None,
+        "state": identity.get("state") or None,
+        "marketing_consent": marketing_consent,
+    }
+
+
+def _add_customer_to_match_cache(cache: dict, customer: sqlite3.Row | dict, source_system: str | None = None) -> None:
+    customer_id = _row_value(customer, "id")
+    if not customer_id:
+        return
+
+    customer_source = (source_system or _row_value(customer, "source_system") or "").strip()
+    external_id = str(_row_value(customer, "external_id") or "").strip()
+    email = str(_row_value(customer, "email") or "").strip().lower()
+    phone = normalize_phone(str(_row_value(customer, "phone") or "").strip())
+    identity = {
+        "first_name": str(_row_value(customer, "first_name") or "").strip(),
+        "last_name": str(_row_value(customer, "last_name") or "").strip(),
+        "city": str(_row_value(customer, "city") or "").strip(),
+        "state": str(_row_value(customer, "state") or "").strip(),
+    }
+
+    if customer_source and external_id:
+        cache["source_external"].setdefault((customer_source, external_id), customer)
+    if email:
+        cache["email_global"].setdefault(email, customer)
+        if customer_source:
+            cache["email_source"].setdefault((customer_source, email), customer)
+    if phone:
+        cache["phone"].setdefault(phone, customer)
+    key = _name_location_key(identity)
+    if key:
+        cache["name_location"].setdefault(key, customer)
+
+
+def build_import_match_cache(conn: sqlite3.Connection, source_system: str) -> dict:
+    cache = {
+        "source_system": source_system,
+        "source_identity_only": source_system in {"clover", "seaview_customer_export"},
+        "source_scoped_identity": source_system in {"clover", "seaview_customer_export", "freshline_customer_export"},
+        "source_external": {},
+        "email_global": {},
+        "email_source": {},
+        "phone": {},
+        "name_location": {},
+    }
+    rows = conn.execute(
+        """
+        SELECT id, external_id, source_system, first_name, last_name, email, phone,
+               city, state, marketing_consent
+        FROM customers
+        ORDER BY updated_at DESC, id DESC
+        """
+    ).fetchall()
+    for customer in rows:
+        _add_customer_to_match_cache(cache, customer)
+    return cache
+
+
+def import_decision_from_identity(
+    cache: dict,
+    source_system: str,
+    identity: dict,
+    *,
+    identifiable: bool = True,
+) -> dict:
+    if not identifiable:
+        return {"outcome": "skip", "reason": "Missing identity", "match_value": ""}
+
+    source_identity_only = cache.get("source_identity_only", source_system in {"clover", "seaview_customer_export"})
+    source_scoped_identity = cache.get(
+        "source_scoped_identity",
+        source_identity_only or source_system == "freshline_customer_export",
+    )
+
+    if source_identity_only and identity["external_id"]:
+        existing = cache["source_external"].get((source_system, identity["external_id"]))
+        if existing:
+            return {"outcome": "merge", "reason": "External ID and source", "match_value": identity["external_id"], "customer": existing}
+        return {"outcome": "create", "reason": "New source record", "match_value": identity["external_id"]}
+
+    if identity["email"] and validate_email(identity["email"]):
+        if source_scoped_identity:
+            existing = cache["email_source"].get((source_system, identity["email"]))
+        else:
+            existing = cache["email_global"].get(identity["email"])
+        if existing:
+            return {"outcome": "merge", "reason": "Exact email", "match_value": identity["email"], "customer": existing}
+
+    if identity["phone"] and source_system != "freshline_customer_export":
+        existing = cache["phone"].get(identity["phone"])
+        if existing:
+            return {"outcome": "merge", "reason": "Normalized phone", "match_value": identity["phone"], "customer": existing}
+
+    if identity["external_id"]:
+        existing = cache["source_external"].get((source_system, identity["external_id"]))
+        if existing:
+            return {"outcome": "merge", "reason": "External ID and source", "match_value": identity["external_id"], "customer": existing}
+
+    key = _name_location_key(identity)
+    if key:
+        existing = cache["name_location"].get(key)
+        if existing:
+            return {
+                "outcome": "review",
+                "reason": "Same name and location",
+                "match_value": build_name_location_match_value(
+                    identity["first_name"], identity["last_name"],
+                    identity["city"], identity["state"],
+                ),
+                "customer": existing,
+            }
+
+    return {"outcome": "create", "reason": "New record", "match_value": ""}
+
+
+def import_row_decision_with_cache(cache: dict, source_system: str, row: dict) -> dict:
+    values = import_row_values(row)
+    return import_decision_from_identity(
+        cache,
+        source_system,
+        import_identity_from_values(values),
+        identifiable=import_values_are_identifiable(values),
+    )
 
 
 def import_row_decision_with_conn(conn: sqlite3.Connection, source_system: str, row: dict) -> dict:
@@ -298,44 +500,51 @@ def analyze_import_rows(source_system: str, rows: list[dict]) -> dict:
         if not any(column in field["columns"] for group in mapped_fields for field in group["fields"])
     ]
     outcome_counts = {"create": 0, "merge": 0, "review": 0, "skip": 0}
+    contactable_rows = 0
+    consent_rows = 0
+    campaign_ready_rows = 0
+    named_unreachable_rows = 0
+    anonymous_rows = 0
+    reachable_needs_consent_rows = 0
+    valid_emails: list[str] = []
+    valid_phones: list[str] = []
+    purchase_rows = 0
     conn = db_connection()
     try:
+        match_cache = build_import_match_cache(conn, source_system)
         for row in rows:
-            outcome = import_row_decision_with_conn(conn, source_system, row)["outcome"]
+            compiled = compile_import_row(row)
+            outcome = import_decision_from_identity(
+                match_cache,
+                source_system,
+                compiled["identity"],
+                identifiable=compiled["identifiable"],
+            )["outcome"]
             outcome_counts[outcome] += 1
+            if compiled["has_usable_contact"]:
+                contactable_rows += 1
+            if compiled["marketing_allowed"]:
+                consent_rows += 1
+            if compiled["has_usable_contact"] and compiled["marketing_allowed"]:
+                campaign_ready_rows += 1
+            if compiled["has_name"] and not compiled["has_usable_contact"]:
+                named_unreachable_rows += 1
+            if not compiled["has_name"]:
+                anonymous_rows += 1
+            if compiled["has_usable_contact"] and not compiled["marketing_allowed"]:
+                reachable_needs_consent_rows += 1
+            if compiled["valid_email"]:
+                valid_emails.append(compiled["valid_email"])
+            if compiled["valid_phone"]:
+                valid_phones.append(compiled["valid_phone"])
+            if compiled["has_purchase"]:
+                purchase_rows += 1
     finally:
         conn.close()
 
     identifiable_rows = outcome_counts["create"] + outcome_counts["merge"] + outcome_counts["review"]
-    contactable_rows = sum(1 for row in rows if import_row_has_usable_contact(row))
-    consent_rows = sum(1 for row in rows if import_row_marketing_allowed(row))
-    campaign_ready_rows = sum(
-        1 for row in rows if import_row_has_usable_contact(row) and import_row_marketing_allowed(row)
-    )
-    named_unreachable_rows = sum(
-        1 for row in rows if import_row_has_name(row) and not import_row_has_usable_contact(row)
-    )
-    anonymous_rows = sum(1 for row in rows if not import_row_has_name(row))
-    reachable_needs_consent_rows = sum(
-        1 for row in rows if import_row_has_usable_contact(row) and not import_row_marketing_allowed(row)
-    )
-    valid_emails = [
-        value_for(row, "email").strip().lower()
-        for row in rows
-        if value_for(row, "email").strip().lower()
-        and validate_email(value_for(row, "email").strip().lower())
-    ]
-    valid_phones = [
-        normalize_phone(value_for(row, "phone").strip())
-        for row in rows
-        if len(normalize_phone(value_for(row, "phone").strip())) == 10
-    ]
     duplicate_email_values = sum(1 for _value, count in Counter(valid_emails).items() if count > 1)
     duplicate_phone_values = sum(1 for _value, count in Counter(valid_phones).items() if count > 1)
-    purchase_rows = sum(
-        1 for row in rows
-        if value_for(row, "item_name") or value_for(row, "order_total") or value_for(row, "purchased_at")
-    )
     skipped_rows = outcome_counts["skip"]
 
     warnings: list[str] = []
@@ -426,8 +635,15 @@ def import_rows(source_system: str, filename: str, rows: list[dict]) -> dict:
     touched_ids: set[int] = set()
     try:
         before_snapshot = customer_file_snapshot_with_conn(conn)
+        match_cache = build_import_match_cache(conn, source_system)
         for row in rows:
-            decision = import_row_decision_with_conn(conn, source_system, row)
+            compiled = compile_import_row(row)
+            decision = import_decision_from_identity(
+                match_cache,
+                source_system,
+                compiled["identity"],
+                identifiable=compiled["identifiable"],
+            )
             if decision["outcome"] == "skip":
                 skipped += 1
                 continue
@@ -440,6 +656,17 @@ def import_rows(source_system: str, filename: str, rows: list[dict]) -> dict:
                 created += 1
             else:
                 updated += 1
+            identity = compiled["identity"].copy()
+            identity["source_system"] = source_system
+            _add_customer_to_match_cache(
+                match_cache,
+                _minimal_customer_from_identity(
+                    customer_id,
+                    identity,
+                    1 if compiled["marketing_allowed"] else 0,
+                ),
+                source_system,
+            )
             if decision["outcome"] == "review":
                 review_needed += 1
                 matched_customer = decision["customer"]
@@ -497,14 +724,6 @@ def import_rows(source_system: str, filename: str, rows: list[dict]) -> dict:
             touched_after=touched_after,
         )
         intelligence_summary = build_source_aware_import_summary(conn, source_system, intelligence_summary)
-        if intelligence_summary.get("source_metrics"):
-            print(
-                "[import-debug]",
-                source_system,
-                intelligence_summary.get("source_type"),
-                intelligence_summary["source_metrics"],
-                flush=True,
-            )
         conn.execute(
             """
             INSERT INTO import_runs (

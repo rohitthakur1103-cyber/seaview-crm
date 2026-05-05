@@ -9,6 +9,7 @@ os.environ.setdefault("SEAVIEW_SESSION_SECRET", "test-secret")
 
 import app  # noqa: E402
 import crm.ai  # noqa: E402
+import crm.imports  # noqa: E402
 
 
 class ProductReadinessTests(unittest.TestCase):
@@ -138,6 +139,80 @@ class ProductReadinessTests(unittest.TestCase):
         popped = app.pop_pending_import("pending-preview-test")
         self.assertIsNotNone(popped)
         self.assertIsNone(app.load_pending_import("pending-preview-test"))
+
+    def test_import_analysis_uses_cached_customer_matching(self):
+        seed_row = {
+            "First Name": "Cached",
+            "Last Name": "Buyer",
+            "Email": "cached-buyer@example.com",
+            "Marketing Consent": "yes",
+        }
+        result = app.import_rows("legacy_csv", "cache-seed.csv", [seed_row])
+        self.assertIsNone(result["error_message"])
+
+        original = crm.imports.import_row_decision_with_conn
+
+        def fail_if_row_by_row_db_matching_is_used(*_args, **_kwargs):
+            raise AssertionError("analysis should use the import match cache")
+
+        try:
+            crm.imports.import_row_decision_with_conn = fail_if_row_by_row_db_matching_is_used
+            analysis = app.analyze_import_rows(
+                "legacy_csv",
+                [
+                    seed_row,
+                    {
+                        "First Name": "New",
+                        "Last Name": "Buyer",
+                        "Email": "new-buyer@example.com",
+                        "Marketing Consent": "yes",
+                    },
+                ],
+            )
+        finally:
+            crm.imports.import_row_decision_with_conn = original
+
+        self.assertEqual(1, analysis["merge_rows"])
+        self.assertEqual(1, analysis["create_rows"])
+
+    def test_ai_weekly_brief_render_is_structured(self):
+        html = app.render_ai_weekly_brief(
+            {
+                "headline": "Weekly customer file is ready for manager review",
+                "executive_summary": "The CRM is ready for focused follow-up. Review cleanup items before exporting a list.",
+                "key_metrics": [
+                    {"label": "Campaign-ready", "value": "42", "context": "Reachable and consented customers."},
+                    {"label": "Duplicate review", "value": "3", "context": "Potential repeated outreach risk."},
+                    {"label": "Capture gap", "value": "12", "context": "Customers missing email or phone."},
+                ],
+                "sections": {
+                    "key_customer_insights": ["Recent buyers should be prioritized for timely seafood specials."],
+                    "data_quality_issues": ["Duplicate candidates need review before export."],
+                    "campaign_opportunities": ["Use the reachable audience for a weekend offer."],
+                    "risks_or_missing_information": ["Missing consent limits campaign reach."],
+                },
+                "actions": [
+                    {
+                        "title": "Review duplicate risks",
+                        "reason": "Protect customers from repeated messages.",
+                        "cta": "Open duplicate review",
+                        "owner": "Manager",
+                        "timing": "Before export",
+                    }
+                ],
+            },
+            user={"username": "seaview", "role": "admin"},
+        )
+        for label in (
+            b"Executive Summary",
+            b"Key Customer Insights",
+            b"Data Quality Issues",
+            b"Campaign Opportunities",
+            b"Recommended Next Actions",
+            b"Risks or Missing Information",
+        ):
+            self.assertIn(label, html)
+        self.assertIn(b"brief-metric-card", html)
 
     def test_ai_success_and_failure_paths_are_safe(self):
         app.set_setting("openai_api_key", "sk-test")

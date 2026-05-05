@@ -6202,7 +6202,7 @@ def render_imports(
       <section class="grid balanced-grid" style="margin-bottom:1rem">
         <div class="panel">
           <h3>Weekly file upload</h3>
-          <form method="post" action="/imports" enctype="multipart/form-data" class="stack import-form">
+          <form method="post" action="/imports" enctype="multipart/form-data" class="stack import-form" data-import-submit-form>
             <label>Source system
               <select name="source_system">
                 <option value="seaview_customer_export">Seaview customer export</option>
@@ -6226,7 +6226,8 @@ def render_imports(
                 </span>
               </label>
             </div>
-            <button type="submit" class="import-submit">Import data</button>
+            <button type="submit" class="import-submit" data-loading-label="Preparing preview...">Import data</button>
+            <span class="loading-note" data-import-loading hidden>Reading the file, mapping columns, and checking customer matches.</span>
           </form>
         </div>
         <div class="panel">
@@ -6443,9 +6444,10 @@ def render_import_preview(import_id: str, message: str = "", user: dict | None =
       </table>
     </div>
     <div class="button-row">
-      <form method="post" action="/imports/confirm">
+      <form method="post" action="/imports/confirm" data-import-submit-form>
         <input type="hidden" name="import_id" value="{escape(import_id)}">
-        <button type="submit"{disabled_attr}>{confirm_label}</button>
+        <button type="submit"{disabled_attr} data-loading-label="Importing customers...">{confirm_label}</button>
+        <span class="loading-note" data-import-loading hidden>Saving customers in one safe transaction. Large files may take a moment.</span>
       </form>
       <form method="post" action="/imports/cancel">
         <input type="hidden" name="import_id" value="{escape(import_id)}">
@@ -7176,15 +7178,96 @@ def healthcheck_response() -> tuple[HTTPStatus, bytes]:
 
 
 def render_ai_weekly_brief(brief: dict, user: dict | None, message: str = "") -> bytes:
+    def clean_text(value, fallback: str = "") -> str:
+        text = str(value or "").strip()
+        return text if text else fallback
+
+    def clean_list(value, limit: int = 5) -> list[str]:
+        if isinstance(value, list):
+            items = []
+            for item in value:
+                if isinstance(item, dict):
+                    text = clean_text(item.get("text") or item.get("summary") or item.get("title") or item.get("reason"))
+                else:
+                    text = clean_text(item)
+                if text:
+                    items.append(text)
+            return items[:limit]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    sections = brief.get("sections") if isinstance(brief.get("sections"), dict) else {}
+    actions = brief.get("actions") if isinstance(brief.get("actions"), list) else []
+    executive_summary = clean_text(
+        brief.get("executive_summary") or brief.get("summary"),
+        "Focus this week on the highest-confidence customer work, then verify the data quality risks before campaign handoff.",
+    )
+    key_customer_insights = (
+        clean_list(sections.get("key_customer_insights"))
+        or clean_list(brief.get("key_customer_insights"))
+        or [executive_summary]
+    )
+    data_quality_issues = (
+        clean_list(sections.get("data_quality_issues"))
+        or clean_list(brief.get("data_quality_issues"))
+        or clean_list(brief.get("risks"))
+        or ["Review duplicate, consent, and reachability signals before exporting a campaign list."]
+    )
+    campaign_opportunities = (
+        clean_list(sections.get("campaign_opportunities"))
+        or clean_list(brief.get("campaign_opportunities"))
+        or clean_list([action.get("reason") for action in actions if isinstance(action, dict)])
+        or ["Use the current CRM segments to choose one focused audience for this week's outreach."]
+    )
+    risks_or_missing_information = (
+        clean_list(sections.get("risks_or_missing_information"))
+        or clean_list(brief.get("risks_or_missing_information"))
+        or clean_list(brief.get("risks"))
+        or ["AI can structure the review, but locked CRM counts remain the source of truth."]
+    )
+
+    metrics = brief.get("key_metrics") if isinstance(brief.get("key_metrics"), list) else []
+    if not metrics:
+        metrics = [
+            {"label": "Brief mode", "value": "CRM counts", "context": "Recommendations are generated from locked CRM totals."},
+            {"label": "Next actions", "value": str(len(actions) or "Review"), "context": "Manager-ready work items for the week."},
+            {"label": "Data check", "value": "Required", "context": "Confirm reachability, consent, and duplicate risk before exports."},
+        ]
+    metric_html = "".join(
+        f"""
+        <article class="brief-metric-card">
+          <span>{escape(clean_text(metric.get('label'), 'Metric'))}</span>
+          <strong>{escape(clean_text(metric.get('value'), 'Review'))}</strong>
+          <p>{escape(clean_text(metric.get('context'), 'Use this signal in the weekly review.'))}</p>
+        </article>
+        """
+        for metric in metrics[:6]
+        if isinstance(metric, dict)
+    )
+
+    def section_card(title: str, items: list[str]) -> str:
+        bullet_html = "".join(f"<li>{escape(item)}</li>" for item in items[:6])
+        return f"""
+        <article class="brief-section-card">
+          <h3>{escape(title)}</h3>
+          <ul class="brief-list">{bullet_html}</ul>
+        </article>
+        """
+
     actions = brief.get("actions") if isinstance(brief.get("actions"), list) else []
     action_html = "".join(
         f"""
-        <li class="action-item">
-          <span class="action-number">{str(i + 1).zfill(2)}</span>
-          <div class="action-body">
-            <strong>{escape(str(action.get('title', 'Next action')))}</strong>
-            <p>{escape(str(action.get('reason', 'Use the latest CRM data to decide the next move.')))}</p>
-            <span class="muted">{escape(str(action.get('cta', 'Assign this to staff.')))}</span>
+        <li class="brief-action-card">
+          <span class="brief-action-number">{str(i + 1).zfill(2)}</span>
+          <div class="brief-action-body">
+            <strong>{escape(clean_text(action.get('title'), 'Next action'))}</strong>
+            <p>{escape(clean_text(action.get('reason'), 'Use the latest CRM data to decide the next move.'))}</p>
+            <div class="brief-action-meta">
+              <span>Owner: {escape(clean_text(action.get('owner'), 'Manager'))}</span>
+              <span>Timing: {escape(clean_text(action.get('timing'), 'This week'))}</span>
+              <span>{escape(clean_text(action.get('cta'), 'Assign this to staff.'))}</span>
+            </div>
           </div>
         </li>
         """
@@ -7192,12 +7275,7 @@ def render_ai_weekly_brief(brief: dict, user: dict | None, message: str = "") ->
         if isinstance(action, dict)
     )
     if not action_html:
-        action_html = "<li class='muted'>The AI brief did not return action items. Try again after adding the API key or refreshing the data.</li>"
-    risks = brief.get("risks")
-    if isinstance(risks, list):
-        risks_html = "".join(f"<li>{escape(str(item))}</li>" for item in risks[:4])
-    else:
-        risks_html = f"<li>{escape(str(risks or 'No major risks returned.'))}</li>"
+        action_html = "<li class='brief-empty'>The AI brief did not return action items. Regenerate after the CRM counts refresh.</li>"
     body = f"""
     <section class="page-head">
       <div>
@@ -7211,21 +7289,34 @@ def render_ai_weekly_brief(brief: dict, user: dict | None, message: str = "") ->
         </form>
       </div>
     </section>
-    <section class="panel ai-output">
-      <span class="eyebrow">Operating recommendation</span>
-      <h3>{escape(str(brief.get('headline', 'This week at Seaview')))}</h3>
-      <p>{escape(str(brief.get('summary', 'Focus on the highest-impact customer work this week.')))}</p>
+    <section class="panel ai-output brief-hero">
+      <div class="brief-hero-copy">
+        <span class="eyebrow">Executive Summary</span>
+        <h3>{escape(clean_text(brief.get('headline'), 'This week at Seaview'))}</h3>
+        <p>{escape(executive_summary)}</p>
+      </div>
+      <div class="brief-source-chip">
+        <strong>Source of truth</strong>
+        <span>Locked CRM counts plus cleanup state</span>
+      </div>
     </section>
-    <section class="grid balanced-grid">
-      <div class="panel">
-        <h3>Recommended tasks</h3>
-        <ol class="action-list">{action_html}</ol>
+    <section class="brief-metric-grid">
+      {metric_html}
+    </section>
+    <section class="brief-section-grid">
+      {section_card("Key Customer Insights", key_customer_insights)}
+      {section_card("Data Quality Issues", data_quality_issues)}
+      {section_card("Campaign Opportunities", campaign_opportunities)}
+      {section_card("Risks or Missing Information", risks_or_missing_information)}
+    </section>
+    <section class="panel brief-actions-panel">
+      <div class="section-heading-row">
+        <div>
+          <h3>Recommended Next Actions</h3>
+          <p class="muted">Use these as the manager review checklist before campaign or handoff work.</p>
+        </div>
       </div>
-      <div class="panel">
-        <h3>Watch-outs</h3>
-        <ul class="stacked-list compact-list">{risks_html}</ul>
-        <p class="muted">AI can help write the brief, but the locked CRM counts remain the source of truth.</p>
-      </div>
+      <ol class="brief-action-list">{action_html}</ol>
     </section>
     """
     return base_layout("AI Weekly Brief", body, flash=message, active_section="dashboard", user=user)

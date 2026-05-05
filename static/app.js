@@ -83,6 +83,32 @@ document.addEventListener("DOMContentLoaded", () => {
     updateFileName();
   }
 
+  document.querySelectorAll("[data-import-submit-form]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      const submitter = event.submitter || form.querySelector("button[type='submit']");
+      if (submitter?.disabled) {
+        return;
+      }
+
+      form.classList.add("is-submitting");
+      form.setAttribute("aria-busy", "true");
+      form.querySelectorAll("[data-import-loading]").forEach((note) => {
+        note.hidden = false;
+      });
+      if (submitter) {
+        const loadingLabel = submitter.getAttribute("data-loading-label");
+        if (loadingLabel) {
+          submitter.dataset.originalLabel = submitter.textContent || "";
+          submitter.textContent = loadingLabel;
+        }
+      }
+      form.querySelectorAll("button").forEach((button) => {
+        button.disabled = true;
+        button.classList.add("is-loading");
+      });
+    });
+  });
+
   for (const button of copyButtons) {
     const originalLabel = button.textContent;
     button.addEventListener("click", async () => {
