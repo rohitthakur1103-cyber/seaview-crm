@@ -230,7 +230,6 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_touchpoints_created_at ON touchpoints(created_at);
         CREATE INDEX IF NOT EXISTS idx_import_runs_created_at ON import_runs(created_at);
         CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at);
-        CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id);
         CREATE INDEX IF NOT EXISTS idx_pending_imports_created_at ON pending_imports(created_at);
         CREATE INDEX IF NOT EXISTS idx_campaigns_status_scheduled_for ON campaigns(status, scheduled_for, created_at);
         CREATE INDEX IF NOT EXISTS idx_outreach_history_created_at ON outreach_history(created_at);

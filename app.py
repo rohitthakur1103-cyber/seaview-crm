@@ -7407,24 +7407,14 @@ def generate_saved_import_ai_brief(summary_id: int, user: dict | None = None, cl
 
 
 def healthcheck_response() -> tuple[HTTPStatus, bytes]:
-    conn = db_connection()
-    try:
-        conn.execute("SELECT 1").fetchone()
-    except Exception as exc:
-        logger.exception("Health check failed")
-        payload = json.dumps({"ok": False, "service": "seaview-crm", "error": str(exc)[:120]}).encode("utf-8")
-        return HTTPStatus.INTERNAL_SERVER_ERROR, payload
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
+    # Render uses this endpoint to decide whether the web process is alive.
+    # Keep it independent of SQLite so a large import cannot make health
+    # checks look down while the app is busy writing customer batches.
     payload = json.dumps(
         {
             "ok": True,
             "service": "seaview-crm",
-            "database": str(DB_PATH),
+            "database": "not_checked",
             "time": utc_now(),
         }
     ).encode("utf-8")

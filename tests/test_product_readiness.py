@@ -52,6 +52,58 @@ class ProductReadinessTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_import_run_pending_index_migrates_after_column(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        conn = app.db_connection()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE import_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_system TEXT NOT NULL,
+                    filename TEXT,
+                    rows_received INTEGER NOT NULL,
+                    customers_created INTEGER NOT NULL,
+                    customers_updated INTEGER NOT NULL,
+                    purchase_events_created INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        app.init_db()
+        app.ensure_runtime_schema()
+
+        conn = app.db_connection()
+        try:
+            import_columns = {row["name"] for row in conn.execute("PRAGMA table_info(import_runs)").fetchall()}
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list(import_runs)").fetchall()}
+            self.assertIn("pending_import_id", import_columns)
+            self.assertIn("idx_import_runs_pending_import_id", indexes)
+        finally:
+            conn.close()
+
+    def test_healthcheck_does_not_wait_on_database(self):
+        original_db_connection = app.db_connection
+
+        def blocked_db_connection():
+            raise AssertionError("healthcheck should not open SQLite")
+
+        app.db_connection = blocked_db_connection
+        try:
+            status, payload = app.healthcheck_response()
+        finally:
+            app.db_connection = original_db_connection
+
+        self.assertEqual(app.HTTPStatus.OK, status)
+        self.assertIn(b'"database": "not_checked"', payload)
+
     def test_manual_tasks_survive_generated_refresh_and_dedupe(self):
         manual = app.create_task(
             {
