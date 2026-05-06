@@ -625,6 +625,24 @@ def get_import_run(import_run_id: int) -> sqlite3.Row | None:
         conn.close()
 
 
+def active_import_run() -> sqlite3.Row | None:
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        return conn.execute(
+            """
+            SELECT *
+            FROM import_runs
+            WHERE status IN ('queued', 'running')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+
 def create_import_job_from_pending(import_id: str) -> dict:
     pending = load_pending_import(import_id)
     if not pending:
@@ -663,8 +681,8 @@ def create_import_job_from_pending(import_id: str) -> dict:
                 source_system, filename, rows_received, rows_processed,
                 customers_created, customers_updated, review_needed_rows,
                 skipped_rows, purchase_events_created, pending_import_id,
-                status, progress_message, error_message, created_at
-            ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, NULL, ?)
+                status, progress_message, progress_stage, error_message, created_at
+            ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, NULL, ?)
             """,
             (
                 pending["source_system"],
@@ -673,6 +691,7 @@ def create_import_job_from_pending(import_id: str) -> dict:
                 import_id,
                 "queued",
                 "Queued for background import.",
+                "queued",
                 now,
             ),
         )
@@ -700,6 +719,7 @@ def _update_import_run_progress(
     skipped: int,
     purchases: int,
     progress_message: str = "",
+    progress_stage: str = "",
     error_message: str | None = None,
     intelligence_summary: dict | None = None,
     completed_at: str | None = None,
@@ -717,6 +737,8 @@ def _update_import_run_progress(
             skipped_rows = ?,
             purchase_events_created = ?,
             progress_message = ?,
+            progress_stage = ?,
+            last_progress_at = ?,
             error_message = ?,
             intelligence_summary = COALESCE(?, intelligence_summary),
             completed_at = COALESCE(?, completed_at)
@@ -731,6 +753,8 @@ def _update_import_run_progress(
             skipped,
             purchases,
             progress_message or None,
+            progress_stage or None,
+            utc_now(),
             error_message,
             record_import_summary(intelligence_summary) if intelligence_summary else None,
             completed_at,
@@ -739,7 +763,7 @@ def _update_import_run_progress(
     )
 
 
-def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
+def process_import_job(import_run_id: int, *, batch_size: int = 500) -> dict:
     from crm.db import db_connection
     from crm.customers import upsert_customer, save_duplicate_review_with_conn
     from crm.intelligence import (
@@ -785,6 +809,7 @@ def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
                 skipped=0,
                 purchases=0,
                 progress_message=error_message,
+                progress_stage="failed",
                 error_message=error_message,
                 completed_at=utc_now(),
             )
@@ -802,10 +827,19 @@ def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
                 rows_received = ?,
                 rows_processed = 0,
                 started_at = COALESCE(started_at, ?),
-                progress_message = ?
+                progress_message = ?,
+                progress_stage = ?,
+                last_progress_at = ?
             WHERE id = ?
             """,
-            (rows_total, utc_now(), "Import is running in the background.", import_run_id),
+            (
+                rows_total,
+                utc_now(),
+                "Preparing customer matching and duplicate checks.",
+                "checking_duplicates",
+                utc_now(),
+                import_run_id,
+            ),
         )
         conn.commit()
 
@@ -889,6 +923,7 @@ def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
                     skipped=skipped,
                     purchases=purchases,
                     progress_message=f"Processed {rows_processed:,} of {rows_total:,} rows.",
+                    progress_stage="saving_records",
                 )
                 conn.commit()
 
@@ -900,6 +935,20 @@ def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
             "skipped_rows": skipped,
             "purchase_events_created": purchases,
         }
+        _update_import_run_progress(
+            conn,
+            import_run_id,
+            status="running",
+            rows_processed=rows_total,
+            created=created,
+            updated=updated,
+            review_needed=review_needed,
+            skipped=skipped,
+            purchases=purchases,
+            progress_message="Building the import summary and data-quality readout.",
+            progress_stage="building_summary",
+        )
+        conn.commit()
         after_snapshot = customer_file_snapshot_with_conn(conn)
         touched_after = {}
         touched_id_list = list(touched_ids)
@@ -931,6 +980,7 @@ def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
             skipped=skipped,
             purchases=purchases,
             progress_message="Import completed.",
+            progress_stage="complete",
             intelligence_summary=intelligence_summary,
             completed_at=utc_now(),
         )
@@ -951,6 +1001,7 @@ def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
                 skipped=skipped,
                 purchases=purchases,
                 progress_message="Import failed. Review the error and upload again if needed.",
+                progress_stage="failed",
                 error_message=error_message,
                 completed_at=utc_now(),
             )

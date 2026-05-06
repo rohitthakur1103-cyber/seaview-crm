@@ -86,7 +86,9 @@ def init_db() -> None:
             status TEXT NOT NULL,
             error_message TEXT,
             progress_message TEXT,
+            progress_stage TEXT,
             started_at TEXT,
+            last_progress_at TEXT,
             completed_at TEXT,
             created_at TEXT NOT NULL
         );
@@ -254,7 +256,9 @@ def init_db() -> None:
     ensure_column(conn, "import_runs", "ai_brief_json", "TEXT")
     ensure_column(conn, "import_runs", "ai_brief_created_at", "TEXT")
     ensure_column(conn, "import_runs", "progress_message", "TEXT")
+    ensure_column(conn, "import_runs", "progress_stage", "TEXT")
     ensure_column(conn, "import_runs", "started_at", "TEXT")
+    ensure_column(conn, "import_runs", "last_progress_at", "TEXT")
     ensure_column(conn, "import_runs", "completed_at", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id)")

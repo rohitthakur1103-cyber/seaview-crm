@@ -5753,6 +5753,15 @@ def render_imports(
     settings = get_app_settings()
     conn = db_connection()
     recent = conn.execute("SELECT * FROM import_runs ORDER BY created_at DESC LIMIT 10").fetchall()
+    active_import = conn.execute(
+        """
+        SELECT *
+        FROM import_runs
+        WHERE status IN ('queued', 'running')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
     summary_row = None
     if summary_id.isdigit():
         summary_row = conn.execute("SELECT * FROM import_runs WHERE id = ?", (int(summary_id),)).fetchone()
@@ -5779,6 +5788,18 @@ def render_imports(
     ai_configured = ai_is_configured(get_setting)
     openai_model = model_from_settings(get_setting)
     openai_key_label = mask_secret(api_key_from_settings(get_setting))
+    import_disabled_attr = " disabled" if active_import else ""
+    active_import_banner = ""
+    if active_import:
+        active_import_banner = f"""
+        <section class="panel warning-panel import-active-banner">
+          <div>
+            <strong>Import in progress</strong>
+            <p>A customer file is already being cleaned, matched, and saved. Upload controls are locked until this import finishes.</p>
+          </div>
+          <a class="button secondary small" href="/imports/runs/{active_import['id']}">View progress</a>
+        </section>
+        """
     guide_rows = "".join(
         f"""
         <li>
@@ -6196,6 +6217,7 @@ def render_imports(
     </section>
 
     {summary_html}
+    {active_import_banner}
 
     <div class="tab-bar">
       <button class="tab-pill" data-tab-trigger="upload">Upload</button>
@@ -6209,7 +6231,7 @@ def render_imports(
           <h3>Weekly file upload</h3>
           <form method="post" action="/imports" enctype="multipart/form-data" class="stack import-form" data-import-submit-form>
             <label>Source system
-              <select name="source_system">
+              <select name="source_system"{import_disabled_attr}>
                 <option value="seaview_customer_export">Seaview customer export</option>
                 <option value="freshline_customer_export">Freshline customer export</option>
                 <option value="clover">Clover export</option>
@@ -6222,7 +6244,7 @@ def render_imports(
             <div class="import-upload">
               <span class="import-field-label">CSV or Excel file</span>
               <label class="import-dropzone" for="csv_file" data-dropzone tabindex="0" aria-label="Upload a CSV or Excel file by dragging and dropping or browsing">
-                <input class="sr-only" id="csv_file" type="file" name="csv_file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-dropzone-input>
+                <input class="sr-only" id="csv_file" type="file" name="csv_file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-dropzone-input{import_disabled_attr}>
                 <span class="import-dropzone-title">Drag and drop your file here</span>
                 <span class="import-dropzone-subtitle">or click to browse from your computer</span>
                 <span class="import-dropzone-actions">
@@ -6231,7 +6253,7 @@ def render_imports(
                 </span>
               </label>
             </div>
-            <button type="submit" class="import-submit" data-loading-label="Preparing preview...">Import data</button>
+            <button type="submit" class="import-submit" data-loading-label="Preparing preview..."{import_disabled_attr}>{'Import locked while another file runs' if active_import else 'Import data'}</button>
             <span class="loading-note" data-import-loading hidden>Reading the file, mapping columns, and checking customer matches.</span>
           </form>
         </div>
@@ -6480,35 +6502,156 @@ def render_import_run_status(import_run_id: int, message: str = "", user: dict |
     percent = 100 if rows_total == 0 and status == "completed" else int(min(100, (rows_processed / rows_total) * 100)) if rows_total else 0
     is_active = status in {"queued", "running"}
     refresh_attr = " data-auto-refresh='3'" if is_active else ""
+    inline_refresh = "<script>setTimeout(function(){ window.location.reload(); }, 3000);</script>" if is_active else ""
     progress_copy = row["progress_message"] or (
         "Import is queued." if status == "queued" else
         "Import is running." if status == "running" else
         "Import completed." if status == "completed" else
         "Import failed."
     )
+    started_at = parse_datetime(row["started_at"] if "started_at" in row.keys() else "")
+    completed_at = parse_datetime(row["completed_at"] if "completed_at" in row.keys() else "")
+    now = datetime.now(UTC)
+
+    def format_duration(seconds: float | None) -> str:
+        if seconds is None or seconds <= 0:
+            return "Calculating estimate..."
+        if seconds < 45:
+            return "Less than a minute"
+        if seconds < 90:
+            return "About 1 minute"
+        if seconds < 3600:
+            return f"About {round(seconds / 60)} minutes"
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"About {hours} hr {minutes} min" if minutes else f"About {hours} hr"
+
+    elapsed_seconds = None
+    rows_per_second = None
+    eta_text = "Calculating estimate..."
+    completion_text = "Calculating estimate..."
+    speed_text = "Calculating speed..."
+    if started_at and rows_processed > 0:
+        elapsed_seconds = max((now - started_at).total_seconds(), 1)
+        rows_per_second = rows_processed / elapsed_seconds
+        speed_text = f"{rows_per_second:,.0f} rows/sec" if rows_per_second >= 10 else f"{rows_per_second:.1f} rows/sec"
+        if is_active and rows_total > rows_processed and rows_per_second > 0:
+            remaining_seconds = (rows_total - rows_processed) / rows_per_second
+            eta_text = format_duration(remaining_seconds)
+            completion_text = (now + timedelta(seconds=remaining_seconds)).strftime("%I:%M %p").lstrip("0")
+        elif status == "completed":
+            eta_text = "Finished"
+            completion_text = completed_at.strftime("%I:%M %p").lstrip("0") if completed_at else "Finished"
+    if status == "completed" and started_at and completed_at:
+        eta_text = f"Completed in {format_duration((completed_at - started_at).total_seconds()).lower()}"
+        completion_text = completed_at.strftime("%I:%M %p").lstrip("0")
+
+    progress_stage = row["progress_stage"] if "progress_stage" in row.keys() else ""
+    if not progress_stage:
+        progress_stage = "complete" if status == "completed" else "failed" if status == "failed" else "saving_records" if rows_processed else "queued"
+    stage_order = {
+        "queued": 3,
+        "checking_duplicates": 3,
+        "saving_records": 5,
+        "building_summary": 6,
+        "dashboard": 7,
+        "complete": 8,
+        "failed": 5,
+    }
+    current_stage_index = stage_order.get(progress_stage, 5)
+    stages = [
+        ("Reading file", "File accepted from upload."),
+        ("Parsing rows", "Headers and rows were detected."),
+        ("Validating customer fields", "Identity, contact, and consent fields checked."),
+        ("Checking duplicate records", "Duplicate risk is compared against the CRM."),
+        ("Matching existing customers", "Existing records are matched before save."),
+        ("Saving customer records", "New and existing customers are written safely."),
+        ("Building import summary", "Reachability and cleanup metrics are rebuilt."),
+        ("Updating CRM dashboard", "Dashboard counts and task recommendations refresh."),
+        ("Preparing imported data for use", "The CRM is ready for follow-up work."),
+    ]
+    stage_html = ""
+    for index, (label, detail) in enumerate(stages):
+        if status == "failed" and index == current_stage_index:
+            stage_state = "failed"
+        elif status == "completed" or index < current_stage_index:
+            stage_state = "complete"
+        elif index == current_stage_index:
+            stage_state = "active"
+        else:
+            stage_state = "pending"
+        stage_html += f"""
+        <li class="import-stage {stage_state}">
+          <span>{index + 1}</span>
+          <div><strong>{escape(label)}</strong><small>{escape(detail)}</small></div>
+        </li>
+        """
+
+    business_summary = ""
+    if status == "completed":
+        capture_metrics = {}
+        conn = db_connection()
+        try:
+            capture_metrics = capture_gap_with_conn(conn)
+        finally:
+            conn.close()
+        import_summary = import_summary_from_row(row) or {}
+        recommendation = "Review duplicate records first, then generate an AI brief to choose the best campaign segment for this week."
+        business_summary = f"""
+        <section class="panel import-complete-panel">
+          <span class="eyebrow">Import complete</span>
+          <h3>Your Seaview customer data is ready to use.</h3>
+          <p>{escape(import_summary.get('headline') or 'The customer file has been cleaned, matched, and saved into the CRM.')}</p>
+          <div class="stats import-progress-stats">
+            <article><span>Campaign-ready</span><strong>{int(capture_metrics.get('freshline_campaign_ready') or 0):,}</strong></article>
+            <article><span>Reachable Freshline</span><strong>{int(capture_metrics.get('freshline_reachable') or 0):,}</strong></article>
+            <article><span>Unreachable Clover</span><strong>{int(capture_metrics.get('dark_customers') or 0):,}</strong></article>
+            <article><span>Marketing allowed</span><strong>{int(capture_metrics.get('marketing_allowed') or 0):,}</strong></article>
+          </div>
+          <div class="import-next-action">
+            <strong>Recommended next action</strong>
+            <p>{escape(recommendation)}</p>
+          </div>
+          <div class="button-row">
+            <a class="button" href="/imports?summary={row['id']}">View import summary</a>
+            <a class="button secondary" href="/duplicates">Review duplicates</a>
+            <a class="button secondary" href="/">Open dashboard</a>
+            <a class="button secondary" href="/imports/ai-brief?summary={row['id']}">Generate AI brief</a>
+            <a class="button secondary" href="/marketing#audiences">Create campaign segment</a>
+          </div>
+        </section>
+        """
+
     error_html = (
         f"<div class='warning-panel'><strong>Import error</strong><p>{escape(row['error_message'] or 'Unknown error')}</p></div>"
         if status == "failed"
         else ""
     )
-    completed_actions = ""
-    if status == "completed":
-        completed_actions = f"""
-        <div class="button-row">
-          <a class="button" href="/imports?summary={row['id']}">Open import summary</a>
-          <a class="button secondary" href="/imports/ai-brief?summary={row['id']}">Generate AI readout</a>
-        </div>
-        """
-    elif is_active:
-        completed_actions = """
-        <p class="muted">This page refreshes automatically while the backend imports the file. You can safely open another CRM page and come back.</p>
-        """
+    safety_copy = (
+        "This import is running server-side. You can keep this page open to watch progress, but closing the tab will not start a duplicate import."
+        if is_active
+        else "The import lock has been released. You can safely continue using the CRM."
+    )
+    critical_style = """
+    <style>
+      body{margin:0;font-family:Georgia,"Times New Roman",serif;color:#171518;background:linear-gradient(180deg,#fffdfd,#f0f1f3)}
+      .shell{display:grid;grid-template-columns:316px 1fr;min-height:100vh}.sidebar{padding:1.35rem;background:#f7f4f3;border-right:1px solid #dadddf}.content{padding:2rem;max-width:1320px}
+      .panel,.page-head,.stats article{background:rgba(255,255,255,.96);border:1px solid #dadddf;border-radius:18px;box-shadow:0 16px 34px rgba(178,57,54,.08)}
+      .page-head{padding:1.5rem;display:flex;justify-content:space-between;gap:1rem;margin-bottom:1.5rem}.button,button{display:inline-flex;align-items:center;justify-content:center;padding:.78rem 1rem;border-radius:14px;border:1px solid #b23936;background:#b23936;color:white;text-decoration:none;font-weight:700}.button.secondary{background:#f6f6f7;color:#171518;border-color:#dadddf}
+      .import-status-shell{display:grid;gap:1rem}.import-progress-panel{display:grid;gap:1.2rem;padding:1.35rem}.import-progress-head{display:flex;justify-content:space-between;gap:1rem}.import-progress-head h3{margin:.25rem 0 0;font-size:1.45rem}.import-progress-head>strong{font-size:3rem;color:#b23936}
+      .import-progress-track{height:1rem;background:#dadddf;border-radius:999px;overflow:hidden}.import-progress-track span{display:block;height:100%;background:linear-gradient(90deg,#b23936,#d7655f)}
+      .stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1rem}.stats article{padding:1rem}.stats span,.eyebrow,.muted{color:#6c6b71}.stats strong{display:block;font-size:1.7rem}.import-stage-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem}.import-stage{display:flex;gap:.65rem;padding:.85rem;border:1px solid #dadddf;border-radius:14px;background:white}.import-stage span{width:1.7rem;height:1.7rem;border-radius:50%;display:grid;place-items:center;background:#eceeef;color:#6c6b71;font-weight:800}.import-stage.active{border-color:#b23936;background:#fff7f6}.import-stage.active span,.import-stage.complete span{background:#b23936;color:white}.import-stage.failed{border-color:#b23936}.import-stage small{display:block;color:#6c6b71;line-height:1.35}.import-complete-panel,.import-estimate-panel,.import-safety-panel{padding:1.25rem}.button-row{display:flex;gap:.75rem;flex-wrap:wrap}.flash{margin-bottom:1rem;padding:.85rem 1rem;border-radius:14px;background:#fff7f6;border:1px solid rgba(178,57,54,.2)}
+      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{position:static}.stats,.import-stage-list{grid-template-columns:1fr}.page-head,.import-progress-head{display:grid}}
+    </style>
+    """
 
     body = f"""
+    {critical_style}
+    <div class="import-status-shell">
     <section class="page-head">
       <div>
-        <h2>Import status</h2>
-        <p>{escape(display_upload_name(row['filename']) or row['filename'] or 'Customer import')}</p>
+        <h2>{'Import complete' if status == 'completed' else 'Importing Seaview customer data'}</h2>
+        <p>We are cleaning, matching, and saving a large customer file so Seaview can use it for customer intelligence and campaign planning.</p>
       </div>
       <div class="button-row">
         <a class="button secondary" href="/imports">Back to imports</a>
@@ -6517,8 +6660,9 @@ def render_import_run_status(import_run_id: int, message: str = "", user: dict |
     <section class="panel import-progress-panel"{refresh_attr}>
       <div class="import-progress-head">
         <div>
-          <span class="eyebrow">{escape(source_system_label(row['source_system']))}</span>
+          <span class="eyebrow">{escape(source_system_label(row['source_system']))} · {escape(display_upload_name(row['filename']) or row['filename'] or 'Customer import')}</span>
           <h3>{status_pill(status)} {escape(progress_copy)}</h3>
+          <p class="muted">{escape(safety_copy)}</p>
         </div>
         <strong>{percent}%</strong>
       </div>
@@ -6532,9 +6676,21 @@ def render_import_run_status(import_run_id: int, message: str = "", user: dict |
         <article><span>Review</span><strong>{int(row['review_needed_rows'] or 0):,}</strong></article>
         <article><span>Skipped</span><strong>{int(row['skipped_rows'] or 0):,}</strong></article>
       </div>
+      <div class="grid import-estimate-grid">
+        <article class="panel import-estimate-panel"><span>Estimated time remaining</span><strong>{escape(eta_text)}</strong></article>
+        <article class="panel import-estimate-panel"><span>Estimated completion</span><strong>{escape(completion_text)}</strong></article>
+        <article class="panel import-estimate-panel"><span>Processing speed</span><strong>{escape(speed_text)}</strong></article>
+      </div>
+      <div class="panel import-safety-panel">
+        <strong>What is happening now</strong>
+        <p>{escape('Large files can take a few minutes while duplicate checks, customer matching, and dashboard metrics are rebuilt. Progress updates automatically every few seconds.')}</p>
+      </div>
+      <ol class="import-stage-list">{stage_html}</ol>
       {error_html}
-      {completed_actions}
     </section>
+    {business_summary}
+    </div>
+    {inline_refresh}
     """
     return base_layout("Import Status", body, flash=message, active_section="imports", user=user)
 
@@ -7488,6 +7644,7 @@ from crm.customers import (  # noqa: E402
 from crm.db import db_connection, ensure_column, ensure_dirs, init_db, seed_demo_data  # noqa: E402
 from crm.imports import (  # noqa: E402
     analyze_import_rows,
+    active_import_run,
     asset_url,
     create_import_job_from_pending,
     delete_pending_import,
@@ -7788,7 +7945,9 @@ def ensure_runtime_schema() -> None:
         ensure_column(conn, "import_runs", "rows_processed", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "import_runs", "pending_import_id", "TEXT")
         ensure_column(conn, "import_runs", "progress_message", "TEXT")
+        ensure_column(conn, "import_runs", "progress_stage", "TEXT")
         ensure_column(conn, "import_runs", "started_at", "TEXT")
+        ensure_column(conn, "import_runs", "last_progress_at", "TEXT")
         ensure_column(conn, "import_runs", "completed_at", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_source_status ON tasks(source, status, priority_score)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at)")
@@ -9227,6 +9386,13 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
         self.respond_not_found()
 
     def handle_import_upload(self) -> None:
+        running_import = active_import_run()
+        if running_import:
+            self.respond_redirect(
+                f"/imports/runs/{running_import['id']}?"
+                + message_query("Another import is already running. Finish that import before uploading a new file.")
+            )
+            return
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
             self.respond_redirect("/imports?" + message_query("Upload failed: expected multipart form data."))

@@ -1040,6 +1040,133 @@ tbody tr:hover td {
   color: var(--muted);
 }
 
+.import-status-shell {
+  display: grid;
+  gap: 1rem;
+}
+
+.import-estimate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.import-estimate-panel,
+.import-safety-panel,
+.import-complete-panel {
+  padding: 1.15rem;
+}
+
+.import-estimate-panel {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.import-estimate-panel span {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.import-estimate-panel strong {
+  font-size: 1.35rem;
+}
+
+.import-safety-panel {
+  display: grid;
+  gap: 0.45rem;
+  background: linear-gradient(135deg, rgba(107, 135, 159, 0.1), rgba(255, 255, 255, 0.96));
+}
+
+.import-safety-panel p,
+.import-complete-panel p,
+.import-next-action p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.import-stage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.import-stage {
+  display: flex;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+}
+
+.import-stage > span {
+  width: 1.7rem;
+  height: 1.7rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(216, 218, 221, 0.7);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.import-stage div {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.import-stage small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.import-stage.active {
+  border-color: rgba(178, 57, 54, 0.3);
+  background: rgba(178, 57, 54, 0.06);
+}
+
+.import-stage.active > span,
+.import-stage.complete > span {
+  color: white;
+  background: var(--accent);
+}
+
+.import-stage.failed {
+  border-color: rgba(178, 57, 54, 0.35);
+  background: rgba(178, 57, 54, 0.08);
+}
+
+.import-complete-panel {
+  display: grid;
+  gap: 1rem;
+  background: linear-gradient(135deg, rgba(29, 120, 73, 0.08), rgba(255, 255, 255, 0.97));
+}
+
+.import-complete-panel h3 {
+  margin: 0;
+  font-size: clamp(1.5rem, 2vw, 2rem);
+}
+
+.import-next-action {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem;
+  border: 1px solid rgba(178, 57, 54, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
 .status-draft,
 .event-saved {
   background: rgba(108, 107, 113, 0.1);
@@ -3615,6 +3742,10 @@ tbody tr:nth-child(even) td {
   }
   .import-progress-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .import-estimate-grid,
+  .import-stage-list {
+    grid-template-columns: 1fr;
   }
 }
 

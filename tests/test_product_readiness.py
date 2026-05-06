@@ -208,6 +208,12 @@ class ProductReadinessTests(unittest.TestCase):
         run = app.get_import_run(job["import_run_id"])
         self.assertEqual("queued", run["status"])
         self.assertEqual(0, run["rows_processed"])
+        self.assertEqual("queued", run["progress_stage"])
+        status_html = app.render_import_run_status(job["import_run_id"], user={"username": "seaview", "role": "admin"})
+        self.assertIn(b"Importing Seaview customer data", status_html)
+        self.assertIn(b"Estimated time remaining", status_html)
+        self.assertIn(b"Checking duplicate records", status_html)
+        self.assertIn(b"data-auto-refresh", status_html)
 
     def test_import_job_processor_completes_and_records_progress(self):
         rows = [
@@ -240,8 +246,12 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual("completed", run["status"])
         self.assertEqual(2, run["rows_processed"])
         self.assertEqual(2, run["customers_created"])
+        self.assertEqual("complete", run["progress_stage"])
         self.assertTrue(run["completed_at"])
         self.assertIsNone(app.load_pending_import("worker-job-test"))
+        status_html = app.render_import_run_status(job["import_run_id"], user={"username": "seaview", "role": "admin"})
+        self.assertIn(b"Your Seaview customer data is ready to use", status_html)
+        self.assertIn(b"Generate AI brief", status_html)
 
     def test_import_job_failure_records_error(self):
         rows = [
