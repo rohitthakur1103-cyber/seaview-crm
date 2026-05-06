@@ -8,6 +8,7 @@ import os
 import secrets
 import socket
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -5799,11 +5800,15 @@ def render_imports(
           <td>{row['customers_created']}</td>
           <td>{row['customers_updated']}</td>
           <td>{row['review_needed_rows'] or 0}</td>
-          <td>{escape(row['status'])}</td>
+          <td><a href="/imports/runs/{row['id']}">{status_pill(row['status'])}</a></td>
           <td>{
               f"<a class='button secondary small' href='/imports/ai-brief?summary={row['id']}'>Open brief</a>"
               if row['ai_brief_json']
-              else "<span class='muted'>Not saved</span>"
+              else (
+                  "<span class='muted'>Waiting for completion</span>"
+                  if row['status'] in {'queued', 'running'}
+                  else "<span class='muted'>Not saved</span>"
+              )
           }</td>
         </tr>
         """
@@ -6456,6 +6461,82 @@ def render_import_preview(import_id: str, message: str = "", user: dict | None =
     </div>
     """
     return base_layout("Import Preview", body, flash=message, active_section="imports", user=user)
+
+
+def render_import_run_status(import_run_id: int, message: str = "", user: dict | None = None) -> bytes:
+    row = get_import_run(import_run_id)
+    if not row:
+        return base_layout(
+            "Import Status",
+            "<div class='panel'><h2>Import not found</h2><p>This import job may have expired or been removed.</p><a class='button secondary' href='/imports'>Back to imports</a></div>",
+            flash=message,
+            active_section="imports",
+            user=user,
+        )
+
+    status = row["status"]
+    rows_total = int(row["rows_received"] or 0)
+    rows_processed = int(row["rows_processed"] or 0)
+    percent = 100 if rows_total == 0 and status == "completed" else int(min(100, (rows_processed / rows_total) * 100)) if rows_total else 0
+    is_active = status in {"queued", "running"}
+    refresh_attr = " data-auto-refresh='3'" if is_active else ""
+    progress_copy = row["progress_message"] or (
+        "Import is queued." if status == "queued" else
+        "Import is running." if status == "running" else
+        "Import completed." if status == "completed" else
+        "Import failed."
+    )
+    error_html = (
+        f"<div class='warning-panel'><strong>Import error</strong><p>{escape(row['error_message'] or 'Unknown error')}</p></div>"
+        if status == "failed"
+        else ""
+    )
+    completed_actions = ""
+    if status == "completed":
+        completed_actions = f"""
+        <div class="button-row">
+          <a class="button" href="/imports?summary={row['id']}">Open import summary</a>
+          <a class="button secondary" href="/imports/ai-brief?summary={row['id']}">Generate AI readout</a>
+        </div>
+        """
+    elif is_active:
+        completed_actions = """
+        <p class="muted">This page refreshes automatically while the backend imports the file. You can safely open another CRM page and come back.</p>
+        """
+
+    body = f"""
+    <section class="page-head">
+      <div>
+        <h2>Import status</h2>
+        <p>{escape(display_upload_name(row['filename']) or row['filename'] or 'Customer import')}</p>
+      </div>
+      <div class="button-row">
+        <a class="button secondary" href="/imports">Back to imports</a>
+      </div>
+    </section>
+    <section class="panel import-progress-panel"{refresh_attr}>
+      <div class="import-progress-head">
+        <div>
+          <span class="eyebrow">{escape(source_system_label(row['source_system']))}</span>
+          <h3>{status_pill(status)} {escape(progress_copy)}</h3>
+        </div>
+        <strong>{percent}%</strong>
+      </div>
+      <div class="import-progress-track" aria-label="Import progress">
+        <span style="width:{percent}%"></span>
+      </div>
+      <div class="stats import-progress-stats">
+        <article><span>Processed</span><strong>{rows_processed:,}</strong><small>of {rows_total:,} rows</small></article>
+        <article><span>Created</span><strong>{int(row['customers_created'] or 0):,}</strong></article>
+        <article><span>Merged</span><strong>{int(row['customers_updated'] or 0):,}</strong></article>
+        <article><span>Review</span><strong>{int(row['review_needed_rows'] or 0):,}</strong></article>
+        <article><span>Skipped</span><strong>{int(row['skipped_rows'] or 0):,}</strong></article>
+      </div>
+      {error_html}
+      {completed_actions}
+    </section>
+    """
+    return base_layout("Import Status", body, flash=message, active_section="imports", user=user)
 
 
 def render_signup(message: str = "", user: dict | None = None) -> bytes:
@@ -7408,8 +7489,10 @@ from crm.db import db_connection, ensure_column, ensure_dirs, init_db, seed_demo
 from crm.imports import (  # noqa: E402
     analyze_import_rows,
     asset_url,
+    create_import_job_from_pending,
     delete_pending_import,
     export_segment_csv,
+    get_import_run,
     import_identity_details,
     import_row_decision_with_conn,
     import_row_is_identifiable,
@@ -7418,6 +7501,7 @@ from crm.imports import (  # noqa: E402
     load_pending_import,
     matched_preview_columns,
     pop_pending_import,
+    process_import_job,
     prune_pending_imports,
     public_capture_page,
     public_capture_pages,
@@ -7517,6 +7601,36 @@ try:  # QR generation is optional at import time, but the demo route reports cle
 except ImportError:  # pragma: no cover - exercised only when dependency is missing locally.
     qrcode = None
     print("Warning: qrcode library not installed; QR PNG downloads will be unavailable.", flush=True)
+
+
+IMPORT_JOB_THREADS: dict[int, threading.Thread] = {}
+IMPORT_JOB_THREADS_LOCK = threading.Lock()
+
+
+def start_import_worker(import_run_id: int) -> None:
+    with IMPORT_JOB_THREADS_LOCK:
+        existing = IMPORT_JOB_THREADS.get(import_run_id)
+        if existing and existing.is_alive():
+            return
+
+        def worker() -> None:
+            try:
+                result = process_import_job(import_run_id)
+                if not result.get("error_message"):
+                    refresh_task_recommendations("import_completed")
+            except Exception:
+                logger.exception("Background import worker crashed for run_id=%s", import_run_id)
+            finally:
+                with IMPORT_JOB_THREADS_LOCK:
+                    IMPORT_JOB_THREADS.pop(import_run_id, None)
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"import-run-{import_run_id}",
+            daemon=True,
+        )
+        IMPORT_JOB_THREADS[import_run_id] = thread
+        thread.start()
 
 
 def _register_qr_capture_variants() -> None:
@@ -7671,7 +7785,14 @@ def ensure_runtime_schema() -> None:
         ensure_column(conn, "tasks", "related_metric", "TEXT")
         ensure_column(conn, "tasks", "generated_from_event", "TEXT")
         ensure_column(conn, "tasks", "refreshed_at", "TEXT")
+        ensure_column(conn, "import_runs", "rows_processed", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "import_runs", "pending_import_id", "TEXT")
+        ensure_column(conn, "import_runs", "progress_message", "TEXT")
+        ensure_column(conn, "import_runs", "started_at", "TEXT")
+        ensure_column(conn, "import_runs", "completed_at", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_source_status ON tasks(source, status, priority_score)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id)")
         user_count = conn.execute(
             "SELECT COUNT(*) AS c FROM staff_users"
         ).fetchone()["c"]
@@ -8095,6 +8216,17 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/imports":
             self.respond_html(render_imports(message, params.get("summary", [""])[0], user=user))
+            return
+        if parsed.path.startswith("/imports/runs/"):
+            try:
+                import_run_id = int(parsed.path.rsplit("/", 1)[-1])
+            except ValueError:
+                self.respond_not_found()
+                return
+            run = get_import_run(import_run_id)
+            if run and run["status"] == "queued":
+                start_import_worker(import_run_id)
+            self.respond_html(render_import_run_status(import_run_id, message, user=user))
             return
         if parsed.path.startswith("/imports/preview/"):
             import_id = parsed.path.rsplit("/", 1)[-1]
@@ -8905,44 +9037,29 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             if not analysis["can_import"]:
                 self.respond_redirect(f"/imports/preview/{import_id}?" + message_query("This file needs usable identity columns before it can be imported."))
                 return
-            pending = pop_pending_import(import_id)
-            if not pending:
-                self.respond_redirect("/imports?" + message_query("Import preview expired. Upload the file again."))
+            job = create_import_job_from_pending(import_id)
+            if job.get("error"):
+                self.respond_redirect("/imports?" + message_query(str(job["error"])))
                 return
-            try:
-                result = import_rows(pending["source_system"], pending["filename"], pending["rows"])
-            except Exception as exc:
-                logger.exception("Import confirmation failed for pending import %s", import_id)
-                self.respond_redirect("/imports?" + message_query(f"Import failed: {str(exc)[:120]}"))
-                return
-            if result["error_message"]:
-                self.respond_redirect("/imports?" + message_query("Import failed."))
-                return
+            import_run_id = int(job["import_run_id"])
             conn = db_connection()
             try:
                 log_audit(
                     conn,
                     user["id"],
                     user["username"],
-                    "import_confirmed",
-                    f"{result['rows_received']} rows, {result['customers_created']} created",
+                    "import_queued",
+                    f"{len(pending['rows'])} rows queued for background import",
                     self.client_address[0] if getattr(self, "client_address", None) else "",
                 )
                 conn.commit()
             finally:
                 conn.close()
-            refresh_summary = refresh_task_recommendations("import_completed")
-            ai_note = ""
-            if result["import_run_id"] and ai_is_configured(get_setting):
-                ai_note = " AI readout is ready to generate from the import summary."
-            if refresh_summary.get("error_message") and not ai_note:
-                ai_note = " Task recommendations used the rule fallback."
-            message = (
-                f"Imported {result['rows_received']} rows. Created {result['customers_created']} customers, "
-                f"merged {result['customers_updated']}, sent {result['review_needed_rows']} to review, "
-                f"skipped {result['skipped_rows']}, and added {result['purchase_events_created']} purchase records.{ai_note}"
-            )
-            self.respond_redirect("/imports?" + urlencode({"summary": str(result["import_run_id"] or ""), "message": message}))
+            start_import_worker(import_run_id)
+            message = "Import started in the background. This page will update as rows are processed."
+            if job.get("already_exists"):
+                message = "This import is already running or completed. Opening its status page."
+            self.respond_redirect(f"/imports/runs/{import_run_id}?" + message_query(message))
             return
         if self.path == "/imports/cancel":
             fields = self.parse_urlencoded()

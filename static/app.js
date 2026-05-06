@@ -109,6 +109,14 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  const autoRefreshTarget = document.querySelector("[data-auto-refresh]");
+  if (autoRefreshTarget) {
+    const seconds = Number(autoRefreshTarget.getAttribute("data-auto-refresh") || "3");
+    window.setTimeout(() => {
+      window.location.reload();
+    }, Math.max(seconds, 1) * 1000);
+  }
+
   for (const button of copyButtons) {
     const originalLabel = button.textContent;
     button.addEventListener("click", async () => {

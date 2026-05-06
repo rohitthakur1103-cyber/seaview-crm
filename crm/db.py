@@ -13,8 +13,10 @@ def ensure_dirs() -> None:
 
 
 def db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -27,6 +29,8 @@ def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, d
 def init_db() -> None:
     ensure_dirs()
     conn = db_connection()
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS customers (
@@ -74,11 +78,16 @@ def init_db() -> None:
             review_needed_rows INTEGER NOT NULL DEFAULT 0,
             skipped_rows INTEGER NOT NULL DEFAULT 0,
             purchase_events_created INTEGER NOT NULL,
+            rows_processed INTEGER NOT NULL DEFAULT 0,
+            pending_import_id TEXT,
             intelligence_summary TEXT,
             ai_brief_json TEXT,
             ai_brief_created_at TEXT,
             status TEXT NOT NULL,
             error_message TEXT,
+            progress_message TEXT,
+            started_at TEXT,
+            completed_at TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -218,6 +227,8 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_touchpoints_customer_created_at ON touchpoints(customer_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_touchpoints_created_at ON touchpoints(created_at);
         CREATE INDEX IF NOT EXISTS idx_import_runs_created_at ON import_runs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id);
         CREATE INDEX IF NOT EXISTS idx_pending_imports_created_at ON pending_imports(created_at);
         CREATE INDEX IF NOT EXISTS idx_campaigns_status_scheduled_for ON campaigns(status, scheduled_for, created_at);
         CREATE INDEX IF NOT EXISTS idx_outreach_history_created_at ON outreach_history(created_at);
@@ -237,9 +248,16 @@ def init_db() -> None:
     ensure_column(conn, "customers", "customer_since", "TEXT")
     ensure_column(conn, "import_runs", "review_needed_rows", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "import_runs", "skipped_rows", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "import_runs", "rows_processed", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "import_runs", "pending_import_id", "TEXT")
     ensure_column(conn, "import_runs", "intelligence_summary", "TEXT")
     ensure_column(conn, "import_runs", "ai_brief_json", "TEXT")
     ensure_column(conn, "import_runs", "ai_brief_created_at", "TEXT")
+    ensure_column(conn, "import_runs", "progress_message", "TEXT")
+    ensure_column(conn, "import_runs", "started_at", "TEXT")
+    ensure_column(conn, "import_runs", "completed_at", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id)")
     ensure_column(conn, "tasks", "priority", "TEXT DEFAULT 'medium'")
     ensure_column(conn, "tasks", "priority_score", "INTEGER DEFAULT 50")
     ensure_column(conn, "tasks", "source", "TEXT DEFAULT 'manual'")

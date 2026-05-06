@@ -615,6 +615,367 @@ def analyze_import_rows(source_system: str, rows: list[dict]) -> dict:
     }
 
 
+def get_import_run(import_run_id: int) -> sqlite3.Row | None:
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        return conn.execute("SELECT * FROM import_runs WHERE id = ?", (import_run_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def create_import_job_from_pending(import_id: str) -> dict:
+    pending = load_pending_import(import_id)
+    if not pending:
+        return {"error": "Import preview expired. Upload the file again."}
+
+    analysis = pending.get("analysis") or analyze_import_rows(pending["source_system"], pending["rows"])
+    if not analysis.get("can_import"):
+        return {"error": "This file needs usable identity columns before it can be imported."}
+
+    from crm.db import db_connection
+
+    conn = db_connection()
+    try:
+        existing = conn.execute(
+            """
+            SELECT id, status
+            FROM import_runs
+            WHERE pending_import_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (import_id,),
+        ).fetchone()
+        if existing:
+            return {
+                "import_run_id": existing["id"],
+                "status": existing["status"],
+                "already_exists": True,
+                "error": None,
+            }
+
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO import_runs (
+                source_system, filename, rows_received, rows_processed,
+                customers_created, customers_updated, review_needed_rows,
+                skipped_rows, purchase_events_created, pending_import_id,
+                status, progress_message, error_message, created_at
+            ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, NULL, ?)
+            """,
+            (
+                pending["source_system"],
+                pending["filename"],
+                len(pending["rows"]),
+                import_id,
+                "queued",
+                "Queued for background import.",
+                now,
+            ),
+        )
+        import_run_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.commit()
+        return {
+            "import_run_id": import_run_id,
+            "status": "queued",
+            "already_exists": False,
+            "error": None,
+        }
+    finally:
+        conn.close()
+
+
+def _update_import_run_progress(
+    conn: sqlite3.Connection,
+    import_run_id: int,
+    *,
+    status: str,
+    rows_processed: int,
+    created: int,
+    updated: int,
+    review_needed: int,
+    skipped: int,
+    purchases: int,
+    progress_message: str = "",
+    error_message: str | None = None,
+    intelligence_summary: dict | None = None,
+    completed_at: str | None = None,
+) -> None:
+    from crm.intelligence import record_import_summary
+
+    conn.execute(
+        """
+        UPDATE import_runs
+        SET status = ?,
+            rows_processed = ?,
+            customers_created = ?,
+            customers_updated = ?,
+            review_needed_rows = ?,
+            skipped_rows = ?,
+            purchase_events_created = ?,
+            progress_message = ?,
+            error_message = ?,
+            intelligence_summary = COALESCE(?, intelligence_summary),
+            completed_at = COALESCE(?, completed_at)
+        WHERE id = ?
+        """,
+        (
+            status,
+            rows_processed,
+            created,
+            updated,
+            review_needed,
+            skipped,
+            purchases,
+            progress_message or None,
+            error_message,
+            record_import_summary(intelligence_summary) if intelligence_summary else None,
+            completed_at,
+            import_run_id,
+        ),
+    )
+
+
+def process_import_job(import_run_id: int, *, batch_size: int = 1000) -> dict:
+    from crm.db import db_connection
+    from crm.customers import upsert_customer, save_duplicate_review_with_conn
+    from crm.intelligence import (
+        build_import_intelligence_summary,
+        build_source_aware_import_summary,
+        customer_contact_state,
+        customer_file_snapshot_with_conn,
+    )
+
+    conn = db_connection()
+    created = updated = review_needed = skipped = purchases = rows_processed = 0
+    error_message = None
+    intelligence_summary = None
+    pending_id = ""
+    try:
+        run = conn.execute("SELECT * FROM import_runs WHERE id = ?", (import_run_id,)).fetchone()
+        if not run:
+            return {"error_message": "Import job not found.", "import_run_id": import_run_id}
+        if run["status"] == "completed":
+            return {
+                "rows_received": run["rows_received"],
+                "customers_created": run["customers_created"],
+                "customers_updated": run["customers_updated"],
+                "review_needed_rows": run["review_needed_rows"],
+                "skipped_rows": run["skipped_rows"],
+                "purchase_events_created": run["purchase_events_created"],
+                "error_message": None,
+                "import_run_id": import_run_id,
+                "intelligence_summary": None,
+            }
+        pending_id = run["pending_import_id"] or ""
+        pending = load_pending_import(pending_id) if pending_id else None
+        if not pending:
+            error_message = "Import source data is no longer available. Upload the file again."
+            _update_import_run_progress(
+                conn,
+                import_run_id,
+                status="failed",
+                rows_processed=0,
+                created=0,
+                updated=0,
+                review_needed=0,
+                skipped=0,
+                purchases=0,
+                progress_message=error_message,
+                error_message=error_message,
+                completed_at=utc_now(),
+            )
+            conn.commit()
+            return {"error_message": error_message, "import_run_id": import_run_id}
+
+        source_system = pending["source_system"]
+        filename = pending["filename"]
+        rows = pending["rows"]
+        rows_total = len(rows)
+        conn.execute(
+            """
+            UPDATE import_runs
+            SET status = 'running',
+                rows_received = ?,
+                rows_processed = 0,
+                started_at = COALESCE(started_at, ?),
+                progress_message = ?
+            WHERE id = ?
+            """,
+            (rows_total, utc_now(), "Import is running in the background.", import_run_id),
+        )
+        conn.commit()
+
+        before_snapshot = customer_file_snapshot_with_conn(conn)
+        match_cache = build_import_match_cache(conn, source_system)
+        touched_before: dict[int, dict] = {}
+        touched_ids: set[int] = set()
+
+        for row_index, row in enumerate(rows, start=1):
+            compiled = compile_import_row(row)
+            decision = import_decision_from_identity(
+                match_cache,
+                source_system,
+                compiled["identity"],
+                identifiable=compiled["identifiable"],
+            )
+            if decision["outcome"] == "skip":
+                skipped += 1
+                rows_processed = row_index
+            else:
+                if decision["outcome"] == "merge" and decision.get("customer"):
+                    existing_customer = decision["customer"]
+                    touched_before[existing_customer["id"]] = customer_contact_state(existing_customer)
+                customer_id, action = upsert_customer(conn, source_system, row)
+                touched_ids.add(customer_id)
+                if action == "created":
+                    created += 1
+                else:
+                    updated += 1
+                identity = compiled["identity"].copy()
+                identity["source_system"] = source_system
+                _add_customer_to_match_cache(
+                    match_cache,
+                    _minimal_customer_from_identity(
+                        customer_id,
+                        identity,
+                        1 if compiled["marketing_allowed"] else 0,
+                    ),
+                    source_system,
+                )
+                if decision["outcome"] == "review":
+                    review_needed += 1
+                    matched_customer = decision["customer"]
+                    save_duplicate_review_with_conn(
+                        conn,
+                        customer_a_id=matched_customer["id"],
+                        customer_b_id=customer_id,
+                        decision="pending",
+                        primary_customer_id=matched_customer["id"],
+                        secondary_customer_id=customer_id,
+                        reason=decision["reason"],
+                        match_value=decision["match_value"],
+                    )
+
+                item_name = value_for(row, "item_name")
+                order_total = to_float(value_for(row, "order_total"))
+                quantity = to_int(value_for(row, "quantity")) or 1
+                purchased_at = parsed_timestamp(value_for(row, "purchased_at"))
+                if item_name or order_total or purchased_at:
+                    conn.execute(
+                        """
+                        INSERT INTO purchase_events (
+                            customer_id, source_system, item_name, quantity,
+                            order_total, purchased_at, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (customer_id, source_system, item_name or None, quantity, order_total, purchased_at, utc_now()),
+                    )
+                    purchases += 1
+                rows_processed = row_index
+
+            if row_index % batch_size == 0:
+                _update_import_run_progress(
+                    conn,
+                    import_run_id,
+                    status="running",
+                    rows_processed=rows_processed,
+                    created=created,
+                    updated=updated,
+                    review_needed=review_needed,
+                    skipped=skipped,
+                    purchases=purchases,
+                    progress_message=f"Processed {rows_processed:,} of {rows_total:,} rows.",
+                )
+                conn.commit()
+
+        import_result = {
+            "rows_received": rows_total,
+            "customers_created": created,
+            "customers_updated": updated,
+            "review_needed_rows": review_needed,
+            "skipped_rows": skipped,
+            "purchase_events_created": purchases,
+        }
+        after_snapshot = customer_file_snapshot_with_conn(conn)
+        touched_after = {}
+        touched_id_list = list(touched_ids)
+        for start_index in range(0, len(touched_id_list), 800):
+            chunk = touched_id_list[start_index : start_index + 800]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            for touched_row in conn.execute(f"SELECT * FROM customers WHERE id IN ({placeholders})", tuple(chunk)).fetchall():
+                touched_after[touched_row["id"]] = touched_row
+        intelligence_summary = build_import_intelligence_summary(
+            source_system=source_system,
+            filename=filename,
+            import_result=import_result,
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            touched_before=touched_before,
+            touched_after=touched_after,
+        )
+        intelligence_summary = build_source_aware_import_summary(conn, source_system, intelligence_summary)
+        _update_import_run_progress(
+            conn,
+            import_run_id,
+            status="completed",
+            rows_processed=rows_total,
+            created=created,
+            updated=updated,
+            review_needed=review_needed,
+            skipped=skipped,
+            purchases=purchases,
+            progress_message="Import completed.",
+            intelligence_summary=intelligence_summary,
+            completed_at=utc_now(),
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.exception("Import job failed for run_id=%s", import_run_id)
+        conn.rollback()
+        error_message = str(exc)[:500]
+        try:
+            _update_import_run_progress(
+                conn,
+                import_run_id,
+                status="failed",
+                rows_processed=rows_processed,
+                created=created,
+                updated=updated,
+                review_needed=review_needed,
+                skipped=skipped,
+                purchases=purchases,
+                progress_message="Import failed. Review the error and upload again if needed.",
+                error_message=error_message,
+                completed_at=utc_now(),
+            )
+            conn.commit()
+        except Exception:
+            logger.exception("Failed to mark import job failed")
+    finally:
+        conn.close()
+
+    if not error_message and pending_id:
+        delete_pending_import(pending_id)
+
+    return {
+        "rows_received": rows_processed,
+        "customers_created": created,
+        "customers_updated": updated,
+        "review_needed_rows": review_needed,
+        "skipped_rows": skipped,
+        "purchase_events_created": purchases,
+        "error_message": error_message,
+        "import_run_id": import_run_id,
+        "intelligence_summary": intelligence_summary,
+    }
+
+
 def import_rows(source_system: str, filename: str, rows: list[dict]) -> dict:
     from crm.db import db_connection
     from crm.customers import upsert_customer, save_duplicate_review_with_conn

@@ -175,6 +175,100 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(1, analysis["merge_rows"])
         self.assertEqual(1, analysis["create_rows"])
 
+    def test_import_job_creation_does_not_process_rows_inline(self):
+        rows = [
+            {
+                "First Name": "Async",
+                "Last Name": "One",
+                "Email": "async-one@example.com",
+                "Marketing Consent": "yes",
+            },
+            {
+                "First Name": "Async",
+                "Last Name": "Two",
+                "Email": "async-two@example.com",
+                "Marketing Consent": "yes",
+            },
+        ]
+        analysis = app.analyze_import_rows("legacy_csv", rows)
+        app.save_pending_import(
+            "async-job-test",
+            source_system="legacy_csv",
+            filename="async.csv",
+            rows=rows,
+            analysis=analysis,
+        )
+
+        before = self._count("SELECT COUNT(*) AS count FROM customers WHERE email LIKE 'async-%@example.com'")
+        job = app.create_import_job_from_pending("async-job-test")
+        after = self._count("SELECT COUNT(*) AS count FROM customers WHERE email LIKE 'async-%@example.com'")
+
+        self.assertIsNone(job["error"])
+        self.assertEqual(before, after)
+        run = app.get_import_run(job["import_run_id"])
+        self.assertEqual("queued", run["status"])
+        self.assertEqual(0, run["rows_processed"])
+
+    def test_import_job_processor_completes_and_records_progress(self):
+        rows = [
+            {
+                "First Name": "Worker",
+                "Last Name": "One",
+                "Email": "worker-one@example.com",
+                "Marketing Consent": "yes",
+            },
+            {
+                "First Name": "Worker",
+                "Last Name": "Two",
+                "Email": "worker-two@example.com",
+                "Marketing Consent": "yes",
+            },
+        ]
+        analysis = app.analyze_import_rows("legacy_csv", rows)
+        app.save_pending_import(
+            "worker-job-test",
+            source_system="legacy_csv",
+            filename="worker.csv",
+            rows=rows,
+            analysis=analysis,
+        )
+        job = app.create_import_job_from_pending("worker-job-test")
+        result = app.process_import_job(job["import_run_id"], batch_size=1)
+
+        self.assertIsNone(result["error_message"])
+        run = app.get_import_run(job["import_run_id"])
+        self.assertEqual("completed", run["status"])
+        self.assertEqual(2, run["rows_processed"])
+        self.assertEqual(2, run["customers_created"])
+        self.assertTrue(run["completed_at"])
+        self.assertIsNone(app.load_pending_import("worker-job-test"))
+
+    def test_import_job_failure_records_error(self):
+        rows = [
+            {
+                "First Name": "Missing",
+                "Last Name": "Source",
+                "Email": "missing-source@example.com",
+            }
+        ]
+        analysis = app.analyze_import_rows("legacy_csv", rows)
+        app.save_pending_import(
+            "missing-source-job-test",
+            source_system="legacy_csv",
+            filename="missing-source.csv",
+            rows=rows,
+            analysis=analysis,
+        )
+        job = app.create_import_job_from_pending("missing-source-job-test")
+        app.delete_pending_import("missing-source-job-test")
+
+        result = app.process_import_job(job["import_run_id"], batch_size=1)
+
+        self.assertIsNotNone(result["error_message"])
+        run = app.get_import_run(job["import_run_id"])
+        self.assertEqual("failed", run["status"])
+        self.assertIn("source data", run["error_message"])
+
     def test_ai_weekly_brief_render_is_structured(self):
         html = app.render_ai_weekly_brief(
             {
