@@ -991,7 +991,12 @@ tbody tr:hover td {
 
 .import-progress-panel {
   display: grid;
-  gap: 1.1rem;
+  gap: 1.15rem;
+  padding: var(--space-5);
+  border-color: rgba(181, 52, 49, 0.14);
+  background:
+    linear-gradient(135deg, rgba(181, 52, 49, 0.055), rgba(255, 255, 255, 0.96) 42%),
+    var(--panel);
 }
 
 .import-progress-head {
@@ -1009,15 +1014,21 @@ tbody tr:hover td {
   margin: 0.25rem 0 0;
 }
 
+.import-progress-copy {
+  font-size: clamp(1.35rem, 2vw, 1.8rem);
+  line-height: 1.12;
+}
+
 .import-progress-head > strong {
   font-size: clamp(2rem, 4vw, 3.2rem);
   color: var(--accent);
   line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 .import-progress-track {
   width: 100%;
-  height: 0.85rem;
+  height: 0.95rem;
   border-radius: 999px;
   overflow: hidden;
   background: rgba(216, 218, 221, 0.72);
@@ -1027,8 +1038,15 @@ tbody tr:hover td {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  transition: width 220ms ease;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.24), transparent 38%, rgba(255, 255, 255, 0.24) 64%, transparent 100%),
+    linear-gradient(90deg, var(--accent), var(--accent-2));
+  background-size: 160px 100%, 100% 100%;
+  transition: width 420ms ease;
+}
+
+.import-status-shell[data-import-active="true"] .import-progress-track span {
+  animation: import-progress-sheen 1.8s linear infinite;
 }
 
 .import-progress-stats {
@@ -1042,7 +1060,7 @@ tbody tr:hover td {
 
 .import-status-shell {
   display: grid;
-  gap: 1rem;
+  gap: var(--space-4);
 }
 
 .import-estimate-grid {
@@ -1136,6 +1154,11 @@ tbody tr:hover td {
   background: rgba(178, 57, 54, 0.06);
 }
 
+.import-stage.complete {
+  border-color: rgba(29, 120, 73, 0.18);
+  background: rgba(29, 120, 73, 0.045);
+}
+
 .import-stage.active > span,
 .import-stage.complete > span {
   color: white;
@@ -1165,6 +1188,26 @@ tbody tr:hover td {
   border: 1px solid rgba(178, 57, 54, 0.16);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.75);
+}
+
+.import-status-shell.is-import-complete .import-progress-panel {
+  border-color: rgba(29, 120, 73, 0.2);
+  background:
+    linear-gradient(135deg, rgba(29, 120, 73, 0.075), rgba(255, 255, 255, 0.97) 42%),
+    var(--panel);
+}
+
+.import-status-shell.is-import-failed .import-progress-panel {
+  border-color: rgba(181, 52, 49, 0.26);
+}
+
+@keyframes import-progress-sheen {
+  from {
+    background-position: -160px 0, 0 0;
+  }
+  to {
+    background-position: 160px 0, 0 0;
+  }
 }
 
 .status-draft,
@@ -1358,6 +1401,9 @@ code {
 .warning-panel {
   display: grid;
   gap: 0.9rem;
+  padding: var(--space-4);
+  border: 1px solid rgba(178, 57, 54, 0.22);
+  border-radius: var(--radius);
   border-color: rgba(178, 57, 54, 0.22);
   background: linear-gradient(180deg, rgba(178, 57, 54, 0.08), rgba(255, 255, 255, 0.96));
 }
@@ -3132,6 +3178,14 @@ tbody tr:nth-child(even) td {
 
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .import-progress-head {
+    display: grid;
+  }
+
+  .import-stage-list {
+    grid-template-columns: 1fr;
   }
 
   .import-intel-card-grid,

@@ -6485,24 +6485,15 @@ def render_import_preview(import_id: str, message: str = "", user: dict | None =
     return base_layout("Import Preview", body, flash=message, active_section="imports", user=user)
 
 
-def render_import_run_status(import_run_id: int, message: str = "", user: dict | None = None) -> bytes:
+def import_run_status_payload(import_run_id: int) -> dict | None:
     row = get_import_run(import_run_id)
     if not row:
-        return base_layout(
-            "Import Status",
-            "<div class='panel'><h2>Import not found</h2><p>This import job may have expired or been removed.</p><a class='button secondary' href='/imports'>Back to imports</a></div>",
-            flash=message,
-            active_section="imports",
-            user=user,
-        )
-
+        return None
     status = row["status"]
     rows_total = int(row["rows_received"] or 0)
     rows_processed = int(row["rows_processed"] or 0)
     percent = 100 if rows_total == 0 and status == "completed" else int(min(100, (rows_processed / rows_total) * 100)) if rows_total else 0
     is_active = status in {"queued", "running"}
-    refresh_attr = " data-auto-refresh='3'" if is_active else ""
-    inline_refresh = "<script>setTimeout(function(){ window.location.reload(); }, 3000);</script>" if is_active else ""
     progress_copy = row["progress_message"] or (
         "Import is queued." if status == "queued" else
         "Import is running." if status == "running" else
@@ -6632,65 +6623,91 @@ def render_import_run_status(import_run_id: int, message: str = "", user: dict |
         if is_active
         else "The import lock has been released. You can safely continue using the CRM."
     )
-    critical_style = """
-    <style>
-      body{margin:0;font-family:Georgia,"Times New Roman",serif;color:#171518;background:linear-gradient(180deg,#fffdfd,#f0f1f3)}
-      .shell{display:grid;grid-template-columns:316px 1fr;min-height:100vh}.sidebar{padding:1.35rem;background:#f7f4f3;border-right:1px solid #dadddf}.content{padding:2rem;max-width:1320px}
-      .panel,.page-head,.stats article{background:rgba(255,255,255,.96);border:1px solid #dadddf;border-radius:18px;box-shadow:0 16px 34px rgba(178,57,54,.08)}
-      .page-head{padding:1.5rem;display:flex;justify-content:space-between;gap:1rem;margin-bottom:1.5rem}.button,button{display:inline-flex;align-items:center;justify-content:center;padding:.78rem 1rem;border-radius:14px;border:1px solid #b23936;background:#b23936;color:white;text-decoration:none;font-weight:700}.button.secondary{background:#f6f6f7;color:#171518;border-color:#dadddf}
-      .import-status-shell{display:grid;gap:1rem}.import-progress-panel{display:grid;gap:1.2rem;padding:1.35rem}.import-progress-head{display:flex;justify-content:space-between;gap:1rem}.import-progress-head h3{margin:.25rem 0 0;font-size:1.45rem}.import-progress-head>strong{font-size:3rem;color:#b23936}
-      .import-progress-track{height:1rem;background:#dadddf;border-radius:999px;overflow:hidden}.import-progress-track span{display:block;height:100%;background:linear-gradient(90deg,#b23936,#d7655f)}
-      .stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1rem}.stats article{padding:1rem}.stats span,.eyebrow,.muted{color:#6c6b71}.stats strong{display:block;font-size:1.7rem}.import-stage-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem}.import-stage{display:flex;gap:.65rem;padding:.85rem;border:1px solid #dadddf;border-radius:14px;background:white}.import-stage span{width:1.7rem;height:1.7rem;border-radius:50%;display:grid;place-items:center;background:#eceeef;color:#6c6b71;font-weight:800}.import-stage.active{border-color:#b23936;background:#fff7f6}.import-stage.active span,.import-stage.complete span{background:#b23936;color:white}.import-stage.failed{border-color:#b23936}.import-stage small{display:block;color:#6c6b71;line-height:1.35}.import-complete-panel,.import-estimate-panel,.import-safety-panel{padding:1.25rem}.button-row{display:flex;gap:.75rem;flex-wrap:wrap}.flash{margin-bottom:1rem;padding:.85rem 1rem;border-radius:14px;background:#fff7f6;border:1px solid rgba(178,57,54,.2)}
-      @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{position:static}.stats,.import-stage-list{grid-template-columns:1fr}.page-head,.import-progress-head{display:grid}}
-    </style>
-    """
+    status_title = "Import complete" if status == "completed" else "Importing Seaview customer data"
+    return {
+        "ok": True,
+        "status": status,
+        "status_title": status_title,
+        "status_pill_html": status_pill(status),
+        "is_active": is_active,
+        "source_label": source_system_label(row["source_system"]),
+        "filename": display_upload_name(row["filename"]) or row["filename"] or "Customer import",
+        "progress_copy": progress_copy,
+        "safety_copy": safety_copy,
+        "percent": percent,
+        "rows_total": rows_total,
+        "rows_processed": rows_processed,
+        "customers_created": int(row["customers_created"] or 0),
+        "customers_updated": int(row["customers_updated"] or 0),
+        "review_needed_rows": int(row["review_needed_rows"] or 0),
+        "skipped_rows": int(row["skipped_rows"] or 0),
+        "eta_text": eta_text,
+        "completion_text": completion_text,
+        "speed_text": speed_text,
+        "stage_html": stage_html,
+        "error_html": error_html,
+        "business_summary_html": business_summary,
+    }
+
+
+def render_import_run_status(import_run_id: int, message: str = "", user: dict | None = None) -> bytes:
+    payload = import_run_status_payload(import_run_id)
+    if not payload:
+        return base_layout(
+            "Import Status",
+            "<div class='panel'><h2>Import not found</h2><p>This import job may have expired or been removed.</p><a class='button secondary' href='/imports'>Back to imports</a></div>",
+            flash=message,
+            active_section="imports",
+            user=user,
+        )
 
     body = f"""
-    {critical_style}
-    <div class="import-status-shell">
+    <div class="import-status-shell" data-import-run-status data-status-url="/imports/runs/{import_run_id}/status.json" data-poll-seconds="3" data-import-active="{str(payload['is_active']).lower()}" data-import-status="{escape(payload['status'])}">
     <section class="page-head">
       <div>
-        <h2>{'Import complete' if status == 'completed' else 'Importing Seaview customer data'}</h2>
+        <h2 data-import-status-title>{escape(payload['status_title'])}</h2>
         <p>We are cleaning, matching, and saving a large customer file so Seaview can use it for customer intelligence and campaign planning.</p>
       </div>
       <div class="button-row">
         <a class="button secondary" href="/imports">Back to imports</a>
       </div>
     </section>
-    <section class="panel import-progress-panel"{refresh_attr}>
+    <section class="panel import-progress-panel" data-import-progress-panel aria-live="polite" aria-busy="{str(payload['is_active']).lower()}">
       <div class="import-progress-head">
         <div>
-          <span class="eyebrow">{escape(source_system_label(row['source_system']))} · {escape(display_upload_name(row['filename']) or row['filename'] or 'Customer import')}</span>
-          <h3>{status_pill(status)} {escape(progress_copy)}</h3>
-          <p class="muted">{escape(safety_copy)}</p>
+          <span class="eyebrow"><span data-import-source>{escape(payload['source_label'])}</span> · <span data-import-filename>{escape(payload['filename'])}</span></span>
+          <h3><span data-import-status-pill>{payload['status_pill_html']}</span><span class="import-progress-copy" data-import-progress-copy>{escape(payload['progress_copy'])}</span></h3>
+          <p class="muted" data-import-safety-copy>{escape(payload['safety_copy'])}</p>
         </div>
-        <strong>{percent}%</strong>
+        <strong data-import-percent>{payload['percent']}%</strong>
       </div>
-      <div class="import-progress-track" aria-label="Import progress">
-        <span style="width:{percent}%"></span>
+      <div class="import-progress-track" aria-label="Import progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{payload['percent']}" data-import-progress-track>
+        <span style="width:{payload['percent']}%" data-import-progress-bar></span>
       </div>
       <div class="stats import-progress-stats">
-        <article><span>Processed</span><strong>{rows_processed:,}</strong><small>of {rows_total:,} rows</small></article>
-        <article><span>Created</span><strong>{int(row['customers_created'] or 0):,}</strong></article>
-        <article><span>Merged</span><strong>{int(row['customers_updated'] or 0):,}</strong></article>
-        <article><span>Review</span><strong>{int(row['review_needed_rows'] or 0):,}</strong></article>
-        <article><span>Skipped</span><strong>{int(row['skipped_rows'] or 0):,}</strong></article>
+        <article><span>Processed</span><strong data-import-rows-processed>{payload['rows_processed']:,}</strong><small data-import-rows-total>of {payload['rows_total']:,} rows</small></article>
+        <article><span>Created</span><strong data-import-created>{payload['customers_created']:,}</strong></article>
+        <article><span>Merged</span><strong data-import-updated>{payload['customers_updated']:,}</strong></article>
+        <article><span>Review</span><strong data-import-review>{payload['review_needed_rows']:,}</strong></article>
+        <article><span>Skipped</span><strong data-import-skipped>{payload['skipped_rows']:,}</strong></article>
       </div>
       <div class="grid import-estimate-grid">
-        <article class="panel import-estimate-panel"><span>Estimated time remaining</span><strong>{escape(eta_text)}</strong></article>
-        <article class="panel import-estimate-panel"><span>Estimated completion</span><strong>{escape(completion_text)}</strong></article>
-        <article class="panel import-estimate-panel"><span>Processing speed</span><strong>{escape(speed_text)}</strong></article>
+        <article class="panel import-estimate-panel"><span>Estimated time remaining</span><strong data-import-eta>{escape(payload['eta_text'])}</strong></article>
+        <article class="panel import-estimate-panel"><span>Estimated completion</span><strong data-import-completion-time>{escape(payload['completion_text'])}</strong></article>
+        <article class="panel import-estimate-panel"><span>Processing speed</span><strong data-import-speed>{escape(payload['speed_text'])}</strong></article>
       </div>
       <div class="panel import-safety-panel">
         <strong>What is happening now</strong>
-        <p>{escape('Large files can take a few minutes while duplicate checks, customer matching, and dashboard metrics are rebuilt. Progress updates automatically every few seconds.')}</p>
+        <p data-import-helper-copy>{escape('Large files can take a few minutes while duplicate checks, customer matching, and dashboard metrics are rebuilt. Progress updates automatically every few seconds without reloading this page.')}</p>
       </div>
-      <ol class="import-stage-list">{stage_html}</ol>
-      {error_html}
+      <ol class="import-stage-list" data-import-stage-list>{payload['stage_html']}</ol>
+      <div data-import-error>{payload['error_html']}</div>
     </section>
-    {business_summary}
+    <div data-import-completion-panel>{payload['business_summary_html']}</div>
+    <noscript>
+      <div class="warning-panel"><strong>Manual refresh needed</strong><p>JavaScript is disabled, so this page cannot update in place. Refresh this page to check import progress.</p></div>
+    </noscript>
     </div>
-    {inline_refresh}
     """
     return base_layout("Import Status", body, flash=message, active_section="imports", user=user)
 
@@ -8375,6 +8392,30 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/imports":
             self.respond_html(render_imports(message, params.get("summary", [""])[0], user=user))
+            return
+        if parsed.path.startswith("/imports/runs/") and parsed.path.endswith("/status.json"):
+            try:
+                import_run_id = int(parsed.path.split("/")[-2])
+            except (IndexError, ValueError):
+                self.respond_not_found()
+                return
+            run = get_import_run(import_run_id)
+            if run and run["status"] == "queued":
+                start_import_worker(import_run_id)
+            payload = import_run_status_payload(import_run_id)
+            if not payload:
+                self.respond_bytes(
+                    json.dumps({"ok": False, "error": "Import job not found."}).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    status=HTTPStatus.NOT_FOUND,
+                    headers={"Cache-Control": "no-store"},
+                )
+                return
+            self.respond_bytes(
+                json.dumps(payload).encode("utf-8"),
+                "application/json; charset=utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
             return
         if parsed.path.startswith("/imports/runs/"):
             try:

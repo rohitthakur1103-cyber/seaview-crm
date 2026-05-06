@@ -109,12 +109,134 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  const autoRefreshTarget = document.querySelector("[data-auto-refresh]");
-  if (autoRefreshTarget) {
-    const seconds = Number(autoRefreshTarget.getAttribute("data-auto-refresh") || "3");
-    window.setTimeout(() => {
-      window.location.reload();
-    }, Math.max(seconds, 1) * 1000);
+  const importStatusShell = document.querySelector("[data-import-run-status]");
+  if (importStatusShell) {
+    const statusUrl = importStatusShell.getAttribute("data-status-url");
+    const pollSeconds = Number(importStatusShell.getAttribute("data-poll-seconds") || "3");
+    const pollMs = Math.max(pollSeconds, 1) * 1000;
+    let stopped = importStatusShell.getAttribute("data-import-active") !== "true";
+    let pollTimer = null;
+    let connectionErrors = 0;
+
+    const formatNumber = (value) =>
+      Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+
+    const setText = (selector, value) => {
+      const target = importStatusShell.querySelector(selector);
+      if (target) {
+        target.textContent = value == null ? "" : String(value);
+      }
+    };
+
+    const setHtml = (selector, value) => {
+      const target = importStatusShell.querySelector(selector);
+      if (target) {
+        target.innerHTML = value || "";
+      }
+    };
+
+    const updateImportStatus = (data) => {
+      if (!data || !data.ok) {
+        return;
+      }
+
+      connectionErrors = 0;
+      stopped = !data.is_active;
+      importStatusShell.dataset.importActive = data.is_active ? "true" : "false";
+      importStatusShell.dataset.importStatus = data.status || "";
+      importStatusShell.classList.toggle("is-import-complete", data.status === "completed");
+      importStatusShell.classList.toggle("is-import-failed", data.status === "failed");
+
+      const progressPanel = importStatusShell.querySelector("[data-import-progress-panel]");
+      if (progressPanel) {
+        progressPanel.setAttribute("aria-busy", data.is_active ? "true" : "false");
+      }
+
+      setText("[data-import-status-title]", data.status_title);
+      setText("[data-import-source]", data.source_label);
+      setText("[data-import-filename]", data.filename);
+      setHtml("[data-import-status-pill]", data.status_pill_html);
+      setText("[data-import-progress-copy]", data.progress_copy);
+      setText("[data-import-safety-copy]", data.safety_copy);
+      setText("[data-import-percent]", `${data.percent || 0}%`);
+      setText("[data-import-rows-processed]", formatNumber(data.rows_processed));
+      setText("[data-import-rows-total]", `of ${formatNumber(data.rows_total)} rows`);
+      setText("[data-import-created]", formatNumber(data.customers_created));
+      setText("[data-import-updated]", formatNumber(data.customers_updated));
+      setText("[data-import-review]", formatNumber(data.review_needed_rows));
+      setText("[data-import-skipped]", formatNumber(data.skipped_rows));
+      setText("[data-import-eta]", data.eta_text);
+      setText("[data-import-completion-time]", data.completion_text);
+      setText("[data-import-speed]", data.speed_text);
+
+      const progressTrack = importStatusShell.querySelector("[data-import-progress-track]");
+      if (progressTrack) {
+        progressTrack.setAttribute("aria-valuenow", String(data.percent || 0));
+      }
+      const progressBar = importStatusShell.querySelector("[data-import-progress-bar]");
+      if (progressBar) {
+        window.requestAnimationFrame(() => {
+          progressBar.style.width = `${Math.max(0, Math.min(Number(data.percent || 0), 100))}%`;
+        });
+      }
+
+      setHtml("[data-import-stage-list]", data.stage_html);
+      setHtml("[data-import-error]", data.error_html);
+      setHtml("[data-import-completion-panel]", data.business_summary_html);
+
+      if (data.status === "completed") {
+        setText(
+          "[data-import-helper-copy]",
+          "Import complete. Seaview customer intelligence, dashboard metrics, and next-action views are ready to use."
+        );
+        document.title = "Import complete";
+      } else if (data.status === "failed") {
+        setText(
+          "[data-import-helper-copy]",
+          "The import stopped before finishing. Review the error below, then return to imports when you are ready to retry."
+        );
+        document.title = "Import failed";
+      } else {
+        document.title = `${data.percent || 0}% import progress`;
+      }
+    };
+
+    const schedulePoll = (delay = pollMs) => {
+      if (stopped || !statusUrl) {
+        return;
+      }
+      window.clearTimeout(pollTimer);
+      pollTimer = window.setTimeout(pollImportStatus, delay);
+    };
+
+    async function pollImportStatus() {
+      if (stopped || !statusUrl) {
+        return;
+      }
+      try {
+        const response = await fetch(statusUrl, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`Status request failed: ${response.status}`);
+        }
+        const data = await response.json();
+        updateImportStatus(data);
+      } catch {
+        connectionErrors += 1;
+        setText(
+          "[data-import-helper-copy]",
+          connectionErrors > 1
+            ? "Still checking import progress. The server may be busy saving a batch, but this page will keep trying without reloading."
+            : "Checking import progress again. This page stays open while the server finishes the import."
+        );
+      } finally {
+        schedulePoll(connectionErrors ? Math.min(pollMs * 2, 8000) : pollMs);
+      }
+    }
+
+    schedulePoll(900);
   }
 
   for (const button of copyButtons) {
