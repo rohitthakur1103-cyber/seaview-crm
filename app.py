@@ -3929,126 +3929,44 @@ def render_public_capture(path: str, message: str = "") -> bytes:
     if not page:
         return public_layout("Not Found", "<div class='panel'><h2>Page not found</h2></div>", flash=message)
     settings = get_app_settings()
-    offer_hook = settings["primary_offer_hook"] or page["headline"]
-    capture_prompt = settings["capture_prompt"] or page["description"]
+    offer_hook = settings["primary_offer_hook"] or "Seaview customer signup"
     cta_label = settings["default_capture_cta"] or page["cta"]
-    is_qr_path = path.startswith("/join/qr/")
     location_tag = page.get("location_tag", "")
 
-    if is_qr_path:
-        # Mobile-first QR form: minimal required fields, optional fields hidden
-        body = f"""
-    <section class="hero public-hero capture-hero">
-      <div>
-        <h2>{escape(page['headline'])}</h2>
-        <p class="muted">{escape(capture_prompt)}</p>
+    body = f"""
+    <section class="panel signup-panel public-capture-card">
+      <div class="public-capture-head">
+        <h2>Join Seaview updates</h2>
+        <p>Leave your email or phone number so Seaview can send specials and fresh-catch updates.</p>
       </div>
-    </section>
-
-    <div class="panel signup-panel">
-      <form method="post" action="{escape(path)}" class="stack" data-qr-form>
-        <input type="hidden" name="touchpoint_type" value="{escape(page['touchpoint_type'])}">
-        <input type="hidden" name="source_label" value="{escape(page['label'])}">
-        <input type="hidden" name="capture_offer" value="{escape(offer_hook)}">
-        <input type="hidden" name="location_tag" value="{escape(location_tag)}">
-        <input type="hidden" name="consent_email" value="1">
-        <input type="hidden" name="consent_sms" value="1">
-        <p data-form-error style="color:var(--accent);display:none"></p>
-        <label>First name
-          <input type="text" name="first_name" autocomplete="given-name">
-        </label>
-        <label>Email <small class="muted">(or phone — at least one required)</small>
-          <input type="email" name="email" placeholder="name@example.com" autocomplete="email">
-        </label>
-        <label>Phone
-          <input type="tel" name="phone" placeholder="(555) 555-5555" autocomplete="tel">
-        </label>
-        <button type="button" data-optional-toggle>Tell us more (optional) &#9660;</button>
-        <div class="optional-fields" data-optional-fields>
+      <form method="post" action="{escape(path)}" class="stack public-capture-form" data-qr-form>
+          <input type="hidden" name="touchpoint_type" value="{escape(page['touchpoint_type'])}">
+          <input type="hidden" name="source_label" value="{escape(page['label'])}">
+          <input type="hidden" name="capture_offer" value="{escape(offer_hook)}">
+          <input type="hidden" name="location_tag" value="{escape(location_tag)}">
+          <input type="hidden" name="preferred_channel" value="{escape(page['preferred_channel'])}">
+          <input type="hidden" name="consent_email" value="1">
+          <input type="hidden" name="consent_sms" value="1">
+          <p class="inline-error" data-form-error hidden></p>
+          <label>First name
+            <input type="text" name="first_name" autocomplete="given-name" inputmode="text">
+          </label>
           <label>Last name
-            <input type="text" name="last_name" autocomplete="family-name">
+            <input type="text" name="last_name" autocomplete="family-name" inputmode="text">
           </label>
-          <label>Preferred contact
-            <select name="preferred_channel">{option_list(PREFERRED_CHANNELS, page['preferred_channel'])}</select>
+          <label>Email
+            <input type="email" name="email" placeholder="name@example.com" autocomplete="email" inputmode="email">
           </label>
-          <label>What are you interested in?
-            <input type="text" name="interest_tags" placeholder="{escape(page['interest_placeholder'])}">
+          <label>Phone
+            <input type="tel" name="phone" placeholder="(555) 555-5555" autocomplete="tel" inputmode="tel">
           </label>
-          <label>Notes
-            <textarea name="notes" rows="2" placeholder="Anything else?"></textarea>
-          </label>
-        </div>
-        <button type="submit">{escape(cta_label)}</button>
+          <p class="muted public-capture-note">Email or phone is required. Seaview will use this only for customer updates and offers.</p>
+          <button type="submit">{escape(cta_label)}</button>
       </form>
       <div class="qr-confirm" data-qr-confirm>
         <div class="confirm-check">&#10003;</div>
         <h3>You're in!</h3>
-        <p>Seaview will send your first deal soon.</p>
-      </div>
-    </div>
-        """
-        return public_layout("Join Seaview Updates", body, flash=message)
-
-    # Standard non-QR public form
-    benefits_html = "".join(
-        f"<li><strong>{escape(item)}</strong></li>" for item in page["benefits"]
-    )
-    body = f"""
-    <section class="hero public-hero capture-hero">
-      <div>
-        <h2>{escape(page['headline'])}</h2>
-        <p>{escape(capture_prompt)}</p>
-      </div>
-      <div class="capture-hero-meta">
-        <span class="pill">{escape(touchpoint_label(page['touchpoint_type']))}</span>
-        <span class="pill">Preferred {escape(channel_label(page['preferred_channel']))}</span>
-      </div>
-    </section>
-
-    <section class="grid wide-grid">
-      <div class="panel signup-panel">
-        <h3>Stay in the loop</h3>
-        <form method="post" action="{escape(path)}" class="stack">
-          <input type="hidden" name="touchpoint_type" value="{escape(page['touchpoint_type'])}">
-          <input type="hidden" name="source_label" value="{escape(page['label'])}">
-          <input type="hidden" name="capture_offer" value="{escape(offer_hook)}">
-          <div class="field-grid">
-            <label>First name
-              <input type="text" name="first_name">
-            </label>
-            <label>Last name
-              <input type="text" name="last_name">
-            </label>
-          </div>
-          <div class="field-grid">
-            <label>Email
-              <input type="email" name="email" placeholder="name@example.com">
-            </label>
-            <label>Phone
-              <input type="text" name="phone" placeholder="(555) 555-5555">
-            </label>
-          </div>
-          <label>Preferred updates
-            <select name="preferred_channel">{option_list(PREFERRED_CHANNELS, page['preferred_channel'])}</select>
-          </label>
-          <label>What are you interested in?
-            <input type="text" name="interest_tags" placeholder="{escape(page['interest_placeholder'])}">
-          </label>
-          <label>Optional notes
-            <textarea name="notes" rows="3" placeholder="Anything Seaview should know before following up?"></textarea>
-          </label>
-          <div class="checkbox-row">
-            <label><input type="checkbox" name="consent_email" value="1"> Email me specials and updates</label>
-            <label><input type="checkbox" name="consent_sms" value="1"> Text me timely offers</label>
-          </div>
-          <button type="submit">{escape(cta_label)}</button>
-        </form>
-        <p class="muted">Only one contact method is required.</p>
-      </div>
-      <div class="panel">
-        <h3>Included</h3>
-        <ul class="stacked-list">{benefits_html}</ul>
-        <p class="muted">{escape(page['capture_note'])}</p>
+        <p>Thanks. Seaview saved your signup.</p>
       </div>
     </section>
     """

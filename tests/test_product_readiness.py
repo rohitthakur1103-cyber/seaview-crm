@@ -163,6 +163,55 @@ class ProductReadinessTests(unittest.TestCase):
             self._count("SELECT COUNT(*) AS count FROM task_refresh_runs WHERE trigger_event = 'public_capture_submitted'"),
         )
 
+    def test_public_qr_capture_is_simple_and_saves_customer(self):
+        html = app.render_public_capture(
+            "/join/qr/counter",
+            message="",
+        )
+        self.assertIn(b"Join Seaview updates", html)
+        self.assertIn(b'data-qr-form', html)
+        self.assertIn(b'name="source_label"', html)
+        self.assertIn(b'name="location_tag"', html)
+        self.assertIn(b"Email or phone is required", html)
+        self.assertNotIn(b"Scan for weekly seafood specials", html)
+        self.assertNotIn(b"Included", html)
+        self.assertNotIn(b"capture-hero", html)
+        self.assertNotIn(b"wide-grid", html)
+
+        capture = app.create_touchpoint_capture(
+            {
+                "first_name": "QR",
+                "last_name": "Guest",
+                "email": "qr-guest@example.com",
+                "phone": "",
+                "consent_email": "1",
+                "consent_sms": "1",
+                "preferred_channel": "sms",
+                "touchpoint_type": "in_store_qr",
+                "source_label": "Front Counter QR",
+                "location_tag": "qr_counter",
+            },
+            public_signup=True,
+        )
+        self.assertIsNone(capture["error"])
+        conn = app.db_connection()
+        try:
+            customer = conn.execute(
+                "SELECT first_name, last_name, email, marketing_consent FROM customers WHERE email = ?",
+                ("qr-guest@example.com",),
+            ).fetchone()
+            touchpoint = conn.execute(
+                "SELECT touchpoint_type, scan_location FROM touchpoints WHERE customer_id = ?",
+                (capture["customer_id"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual("QR", customer["first_name"])
+        self.assertEqual("Guest", customer["last_name"])
+        self.assertEqual(1, customer["marketing_consent"])
+        self.assertEqual("in_store_qr", touchpoint["touchpoint_type"])
+        self.assertEqual("counter", touchpoint["scan_location"])
+
     def test_pending_import_preview_survives_memory_cache_loss(self):
         rows = [
             {

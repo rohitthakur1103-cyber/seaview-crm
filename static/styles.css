@@ -1264,7 +1264,7 @@ code {
 }
 
 .public-shell {
-  width: min(860px, 100%);
+  width: min(520px, 100%);
 }
 
 .auth-panel {
@@ -1275,6 +1275,53 @@ code {
 .public-hero,
 .signup-panel {
   margin-bottom: 1rem;
+}
+
+.public-capture-card {
+  display: grid;
+  gap: 1rem;
+  padding: clamp(1.25rem, 5vw, 1.75rem);
+}
+
+.public-capture-head {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.public-capture-head h2 {
+  margin: 0;
+  font-size: clamp(1.85rem, 8vw, 2.65rem);
+  letter-spacing: -0.04em;
+}
+
+.public-capture-head p,
+.public-capture-note {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.public-capture-form {
+  gap: 0.9rem;
+}
+
+.public-capture-form label {
+  display: grid;
+  gap: 0.42rem;
+  font-weight: 700;
+}
+
+.public-capture-form input {
+  min-height: 3.35rem;
+  border-radius: 14px;
+  font-size: 1.08rem;
+  background: #fff;
+}
+
+.public-capture-form button {
+  width: 100%;
+  min-height: 3.35rem;
+  margin-top: 0.25rem;
+  font-weight: 800;
 }
 
 .capture-hero {

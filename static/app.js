@@ -387,12 +387,17 @@ document.addEventListener("DOMContentLoaded", () => {
         const json = await res.json();
         if (json.success) {
           qrForm.style.display = "none";
+          const heading = document.querySelector(".public-capture-head");
+          if (heading) {
+            heading.style.display = "none";
+          }
           qrConfirm.classList.add("visible");
           qrConfirm.scrollIntoView({ behavior: "smooth" });
         } else {
           const errEl = qrForm.querySelector("[data-form-error]");
           if (errEl) {
             errEl.textContent = json.error || "Something went wrong.";
+            errEl.hidden = false;
             errEl.style.display = "block";
           }
         }
