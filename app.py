@@ -6381,12 +6381,15 @@ def render_import_preview(import_id: str, message: str = "", user: dict | None =
         </ul>
       </div>
     </section>
-    <div class="panel">
+    <div class="panel import-preview-sample-panel">
       <h3>Masked sample rows</h3>
-      <table>
-        <thead><tr>{column_headers}</tr></thead>
-        <tbody>{sample_html}</tbody>
-      </table>
+      <p class="muted">Wide exports stay inside this preview. Scroll sideways to inspect additional columns.</p>
+      <div class="scrollable-table import-preview-sample-table" role="region" aria-label="Masked sample rows">
+        <table>
+          <thead><tr>{column_headers}</tr></thead>
+          <tbody>{sample_html}</tbody>
+        </table>
+      </div>
     </div>
     <div class="button-row">
       <form method="post" action="/imports/confirm" data-import-submit-form>

@@ -241,6 +241,39 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertIsNotNone(popped)
         self.assertIsNone(app.load_pending_import("pending-preview-test"))
 
+    def test_import_preview_contains_wide_sample_rows(self):
+        row = {
+            "Customer ID": "123",
+            "First Name": "Wide",
+            "Last Name": "Preview",
+            "Phone Number": "555-555-5555",
+            "Email Address": "wide-preview@example.com",
+            "Address Line 1": "123 Seaview Way",
+            "Address Line 2": "",
+            "Address Line 3": "",
+            "City": "Raleigh",
+            "State / Province": "NC",
+            "Postal / Zip Code": "27601",
+            "Country": "US",
+            "Customer Since": "2026-04-09",
+            "Marketing Allowed": "No",
+            "Additional Address Info": "Door by the loading area",
+        }
+        analysis = app.analyze_import_rows("seaview_customer_export", [row])
+        app.save_pending_import(
+            "wide-preview-test",
+            source_system="seaview_customer_export",
+            filename="wide-preview.csv",
+            rows=[row],
+            analysis=analysis,
+        )
+
+        html = app.render_import_preview("wide-preview-test", user={"username": "seaview", "role": "admin"})
+        self.assertIn(b"import-preview-sample-panel", html)
+        self.assertIn(b"scrollable-table import-preview-sample-table", html)
+        self.assertIn(b"Scroll sideways to inspect additional columns", html)
+        self.assertIn(b"Additional Address Info", html)
+
     def test_import_analysis_uses_cached_customer_matching(self):
         seed_row = {
             "First Name": "Cached",

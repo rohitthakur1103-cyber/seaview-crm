@@ -3080,6 +3080,51 @@ button.is-loading {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+.import-preview-sample-panel {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.import-preview-sample-panel h3 {
+  margin-bottom: 0.35rem;
+}
+
+.import-preview-sample-panel > p {
+  margin: 0 0 1rem;
+}
+
+.import-preview-sample-table {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.import-preview-sample-table table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+
+.import-preview-sample-table th,
+.import-preview-sample-table td {
+  min-width: 7.5rem;
+  max-width: 12rem;
+  padding: 0.82rem 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.import-preview-sample-table th {
+  vertical-align: bottom;
+  white-space: normal;
+}
+
+.import-preview-sample-table td {
+  white-space: normal;
+}
+
 .scrollable-table thead th {
   position: sticky;
   top: 0;
