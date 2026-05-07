@@ -241,6 +241,62 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertIsNotNone(popped)
         self.assertIsNone(app.load_pending_import("pending-preview-test"))
 
+    def test_large_pending_import_uses_saved_upload_instead_of_sqlite_rows_blob(self):
+        payload = (
+            "First Name,Last Name,Email,Marketing Consent\n"
+            "Disk,One,disk-one@example.com,yes\n"
+            "Disk,Two,disk-two@example.com,yes\n"
+            "Disk,Three,disk-three@example.com,yes\n"
+        ).encode("utf-8")
+        uploaded_name = app.save_upload("large-pending.csv", payload)
+        rows = app.parse_table_bytes(uploaded_name, payload)
+        analysis = app.analyze_import_rows("legacy_csv", rows)
+        original_limit = crm.imports.PENDING_IMPORT_INLINE_ROW_LIMIT
+        crm.imports.PENDING_IMPORT_INLINE_ROW_LIMIT = 2
+        try:
+            app.save_pending_import(
+                "large-pending-test",
+                source_system="legacy_csv",
+                filename=uploaded_name,
+                rows=rows,
+                analysis=analysis,
+            )
+        finally:
+            crm.imports.PENDING_IMPORT_INLINE_ROW_LIMIT = original_limit
+
+        conn = app.db_connection()
+        try:
+            stored = conn.execute(
+                "SELECT rows_json, rows_count, rows_storage FROM pending_imports WHERE id = ?",
+                ("large-pending-test",),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual("[]", stored["rows_json"])
+        self.assertEqual(len(rows), stored["rows_count"])
+        self.assertEqual("upload_file", stored["rows_storage"])
+
+        app.PENDING_IMPORTS.clear()
+        preview_pending = app.load_pending_import("large-pending-test", include_rows=False)
+        self.assertIsNotNone(preview_pending)
+        self.assertEqual([], preview_pending["rows"])
+        self.assertEqual(len(rows), preview_pending["rows_count"])
+
+        hydrated_pending = app.load_pending_import("large-pending-test")
+        self.assertEqual(rows, hydrated_pending["rows"])
+
+        app.PENDING_IMPORTS.clear()
+        job = app.create_import_job_from_pending("large-pending-test")
+        self.assertIsNone(job["error"])
+        run = app.get_import_run(job["import_run_id"])
+        self.assertEqual(len(rows), run["rows_received"])
+
+        app.PENDING_IMPORTS.clear()
+        result = app.process_import_job(job["import_run_id"], batch_size=1)
+        self.assertIsNone(result["error_message"])
+        self.assertIsNone(app.load_pending_import("large-pending-test"))
+        self.assertFalse((app.UPLOADS_DIR / uploaded_name).exists())
+
     def test_import_preview_contains_wide_sample_rows(self):
         row = {
             "Customer ID": "123",

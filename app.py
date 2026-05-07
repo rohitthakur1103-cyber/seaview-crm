@@ -6268,7 +6268,7 @@ def render_imports(
 
 
 def render_import_preview(import_id: str, message: str = "", user: dict | None = None) -> bytes:
-    pending = load_pending_import(import_id)
+    pending = load_pending_import(import_id, include_rows=False)
     if not pending:
         return base_layout(
             "Import Preview",
@@ -6277,9 +6277,22 @@ def render_import_preview(import_id: str, message: str = "", user: dict | None =
             active_section="imports",
             user=user,
         )
-    analysis = pending.get("analysis") or analyze_import_rows(pending["source_system"], pending["rows"])
+    analysis = pending.get("analysis")
+    if not analysis:
+        pending_with_rows = load_pending_import(import_id)
+        if not pending_with_rows:
+            return base_layout(
+                "Import Preview",
+                "<div class='panel'><h2>Import preview expired</h2><p>Upload the file again to review it before importing.</p></div>",
+                flash=message,
+                active_section="imports",
+                user=user,
+            )
+        pending = pending_with_rows
+        analysis = analyze_import_rows(pending["source_system"], pending["rows"])
     columns = pending.get("columns") or analysis["columns"]
-    sample_rows = pending.get("sample_rows") or preview_rows(pending["rows"])
+    sample_rows = pending.get("sample_rows") or preview_rows(pending.get("rows") or [])
+    rows_count = int(pending.get("rows_count") or len(pending.get("rows") or []))
     def safe_preview_value(column: str, value: str) -> str:
         cleaned = (value or "").strip()
         lowered = column.lower()
@@ -6331,7 +6344,7 @@ def render_import_preview(import_id: str, message: str = "", user: dict | None =
       <a class="button secondary" href="/imports">Back to imports</a>
     </section>
     <section class="stats">
-      <article><span>Rows</span><strong>{len(pending['rows'])}</strong></article>
+      <article><span>Rows</span><strong>{rows_count}</strong></article>
       <article><span>Usable contact</span><strong>{analysis['contactable_rows']}</strong></article>
       <article><span>Marketing allowed</span><strong>{analysis['consent_rows']}</strong></article>
       <article><span>Campaign-ready</span><strong>{analysis['campaign_ready_rows']}</strong></article>
@@ -7840,6 +7853,8 @@ def ensure_runtime_schema() -> None:
                 columns_json TEXT NOT NULL,
                 sample_rows_json TEXT NOT NULL,
                 analysis_json TEXT NOT NULL,
+                rows_count INTEGER NOT NULL DEFAULT 0,
+                rows_storage TEXT NOT NULL DEFAULT 'inline',
                 created_at TEXT NOT NULL
             );
 
@@ -7877,6 +7892,8 @@ def ensure_runtime_schema() -> None:
         ensure_column(conn, "import_runs", "started_at", "TEXT")
         ensure_column(conn, "import_runs", "last_progress_at", "TEXT")
         ensure_column(conn, "import_runs", "completed_at", "TEXT")
+        ensure_column(conn, "pending_imports", "rows_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "pending_imports", "rows_storage", "TEXT NOT NULL DEFAULT 'inline'")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_source_status ON tasks(source, status, priority_score)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id)")
@@ -9140,11 +9157,18 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
         if self.path == "/imports/confirm":
             fields = self.parse_urlencoded()
             import_id = fields.get("import_id", "")
-            pending = load_pending_import(import_id)
+            pending = load_pending_import(import_id, include_rows=False)
             if not pending:
                 self.respond_redirect("/imports?" + message_query("Import preview expired. Upload the file again."))
                 return
-            analysis = pending.get("analysis") or analyze_import_rows(pending["source_system"], pending["rows"])
+            analysis = pending.get("analysis")
+            if not analysis:
+                pending_with_rows = load_pending_import(import_id)
+                if not pending_with_rows:
+                    self.respond_redirect("/imports?" + message_query("Import preview expired. Upload the file again."))
+                    return
+                pending = pending_with_rows
+                analysis = analyze_import_rows(pending["source_system"], pending["rows"])
             if not analysis["can_import"]:
                 self.respond_redirect(f"/imports/preview/{import_id}?" + message_query("This file needs usable identity columns before it can be imported."))
                 return
@@ -9153,6 +9177,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                 self.respond_redirect("/imports?" + message_query(str(job["error"])))
                 return
             import_run_id = int(job["import_run_id"])
+            rows_count = int(pending.get("rows_count") or len(pending.get("rows") or []))
             conn = db_connection()
             try:
                 log_audit(
@@ -9160,7 +9185,7 @@ class SeaviewCRMHandler(BaseHTTPRequestHandler):
                     user["id"],
                     user["username"],
                     "import_queued",
-                    f"{len(pending['rows'])} rows queued for background import",
+                    f"{rows_count} rows queued for background import",
                     self.client_address[0] if getattr(self, "client_address", None) else "",
                 )
                 conn.commit()

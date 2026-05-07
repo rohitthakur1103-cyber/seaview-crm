@@ -23,6 +23,7 @@ from crm.config import (
 from crm.utils import (
     normalize_header,
     normalize_phone,
+    parse_table_bytes,
     parse_datetime,
     parse_csv_bytes,
     preview_columns,
@@ -44,6 +45,50 @@ for _field_name, _aliases in ALIASES.items():
     for _alias in _aliases:
         ALIAS_TO_FIELDS[_alias] = (*ALIAS_TO_FIELDS.get(_alias, ()), _field_name)
 
+PENDING_IMPORT_INLINE_ROW_LIMIT = 5_000
+PENDING_IMPORT_STORAGE_INLINE = "inline"
+PENDING_IMPORT_STORAGE_UPLOAD_FILE = "upload_file"
+
+
+def _saved_upload_path(filename: str) -> Path:
+    return UPLOADS_DIR / Path(filename or "").name
+
+
+def _can_reload_rows_from_upload(filename: str) -> bool:
+    path = _saved_upload_path(filename)
+    return path.exists() and path.is_file() and path.suffix.lower() in {".csv", ".xlsx"}
+
+
+def _load_rows_from_saved_upload(filename: str) -> list[dict]:
+    path = _saved_upload_path(filename)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Saved upload is unavailable for pending import: {Path(filename or '').name}")
+    return parse_table_bytes(path.name, path.read_bytes())
+
+
+def _delete_saved_upload(filename: str) -> None:
+    path = _saved_upload_path(filename)
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+    except OSError:
+        logger.warning("Unable to remove pending import upload %s", path.name)
+
+
+def _hydrate_pending_rows(payload: dict) -> bool:
+    if payload.get("rows"):
+        return True
+    if payload.get("rows_storage") != PENDING_IMPORT_STORAGE_UPLOAD_FILE:
+        return True
+    try:
+        rows = _load_rows_from_saved_upload(payload.get("filename", ""))
+    except Exception:
+        logger.exception("Unable to reload pending import rows from saved upload")
+        return False
+    payload["rows"] = rows
+    payload["rows_count"] = len(rows)
+    return True
+
 
 def _pending_import_cutoff(now: float | None = None) -> str:
     cutoff_ts = (now or time.time()) - PENDING_IMPORT_TTL_SECONDS
@@ -60,10 +105,22 @@ def save_pending_import(
     columns: list[str] | None = None,
     sample_rows: list[dict] | None = None,
 ) -> None:
+    rows_count = len(rows)
+    rows_storage = PENDING_IMPORT_STORAGE_INLINE
+    cache_rows = rows
+    if rows_count > PENDING_IMPORT_INLINE_ROW_LIMIT and _can_reload_rows_from_upload(filename):
+        rows_json = "[]"
+        rows_storage = PENDING_IMPORT_STORAGE_UPLOAD_FILE
+        cache_rows = []
+    else:
+        rows_json = json.dumps(rows, separators=(",", ":"))
+
     payload = {
         "source_system": source_system,
         "filename": filename,
-        "rows": rows,
+        "rows": cache_rows,
+        "rows_count": rows_count,
+        "rows_storage": rows_storage,
         "columns": columns or analysis.get("columns") or preview_columns(rows),
         "sample_rows": sample_rows or preview_rows(rows),
         "analysis": analysis,
@@ -78,17 +135,19 @@ def save_pending_import(
             """
             INSERT OR REPLACE INTO pending_imports (
                 id, source_system, filename, rows_json, columns_json,
-                sample_rows_json, analysis_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                sample_rows_json, analysis_json, rows_count, rows_storage, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 import_id,
                 source_system,
                 filename,
-                json.dumps(rows, separators=(",", ":")),
+                rows_json,
                 json.dumps(payload["columns"], separators=(",", ":")),
                 json.dumps(payload["sample_rows"], separators=(",", ":")),
                 json.dumps(analysis, separators=(",", ":")),
+                rows_count,
+                rows_storage,
                 utc_now(),
             ),
         )
@@ -97,9 +156,12 @@ def save_pending_import(
         conn.close()
 
 
-def load_pending_import(import_id: str) -> dict | None:
+def load_pending_import(import_id: str, *, include_rows: bool = True) -> dict | None:
     cached = PENDING_IMPORTS.get(import_id)
     if cached:
+        if include_rows and not _hydrate_pending_rows(cached):
+            delete_pending_import(import_id)
+            return None
         return cached
     prune_pending_imports()
     from crm.db import db_connection
@@ -112,10 +174,24 @@ def load_pending_import(import_id: str) -> dict | None:
     if not row:
         return None
     try:
+        row_keys = set(row.keys())
+        rows_storage = (
+            row["rows_storage"]
+            if "rows_storage" in row_keys and row["rows_storage"]
+            else PENDING_IMPORT_STORAGE_INLINE
+        )
+        rows = [] if rows_storage == PENDING_IMPORT_STORAGE_UPLOAD_FILE else json.loads(row["rows_json"])
+        rows_count = (
+            int(row["rows_count"])
+            if "rows_count" in row_keys and row["rows_count"] is not None
+            else len(rows)
+        )
         payload = {
             "source_system": row["source_system"],
             "filename": row["filename"],
-            "rows": json.loads(row["rows_json"]),
+            "rows": rows,
+            "rows_count": rows_count,
+            "rows_storage": rows_storage,
             "columns": json.loads(row["columns_json"]),
             "sample_rows": json.loads(row["sample_rows_json"]),
             "analysis": json.loads(row["analysis_json"]),
@@ -125,19 +201,33 @@ def load_pending_import(import_id: str) -> dict | None:
         delete_pending_import(import_id)
         return None
     PENDING_IMPORTS[import_id] = payload
+    if include_rows and not _hydrate_pending_rows(payload):
+        delete_pending_import(import_id)
+        return None
     return payload
 
 
 def delete_pending_import(import_id: str) -> None:
-    PENDING_IMPORTS.pop(import_id, None)
+    cached = PENDING_IMPORTS.pop(import_id, None)
+    filename = cached.get("filename") if cached else ""
+    rows_storage = cached.get("rows_storage") if cached else ""
     from crm.db import db_connection
 
     conn = db_connection()
     try:
+        row = conn.execute(
+            "SELECT filename, rows_storage FROM pending_imports WHERE id = ?",
+            (import_id,),
+        ).fetchone()
+        if row:
+            filename = filename or row["filename"]
+            rows_storage = rows_storage or row["rows_storage"]
         conn.execute("DELETE FROM pending_imports WHERE id = ?", (import_id,))
         conn.commit()
     finally:
         conn.close()
+    if rows_storage == PENDING_IMPORT_STORAGE_UPLOAD_FILE and filename:
+        _delete_saved_upload(filename)
 
 
 def pop_pending_import(import_id: str) -> dict | None:
@@ -644,13 +734,20 @@ def active_import_run() -> sqlite3.Row | None:
 
 
 def create_import_job_from_pending(import_id: str) -> dict:
-    pending = load_pending_import(import_id)
+    pending = load_pending_import(import_id, include_rows=False)
     if not pending:
         return {"error": "Import preview expired. Upload the file again."}
 
-    analysis = pending.get("analysis") or analyze_import_rows(pending["source_system"], pending["rows"])
+    analysis = pending.get("analysis")
+    if not analysis:
+        pending_with_rows = load_pending_import(import_id)
+        if not pending_with_rows:
+            return {"error": "Import preview expired. Upload the file again."}
+        pending = pending_with_rows
+        analysis = analyze_import_rows(pending["source_system"], pending["rows"])
     if not analysis.get("can_import"):
         return {"error": "This file needs usable identity columns before it can be imported."}
+    rows_count = int(pending.get("rows_count") or len(pending.get("rows") or []))
 
     from crm.db import db_connection
 
@@ -687,7 +784,7 @@ def create_import_job_from_pending(import_id: str) -> dict:
             (
                 pending["source_system"],
                 pending["filename"],
-                len(pending["rows"]),
+                rows_count,
                 import_id,
                 "queued",
                 "Queued for background import.",
@@ -1230,15 +1327,24 @@ def prune_pending_imports(now: float | None = None) -> None:
         if pending.get("created_at_ts", 0) < cutoff
     ]
     for import_id in expired_ids:
-        PENDING_IMPORTS.pop(import_id, None)
+        expired = PENDING_IMPORTS.pop(import_id, None)
+        if expired and expired.get("rows_storage") == PENDING_IMPORT_STORAGE_UPLOAD_FILE:
+            _delete_saved_upload(expired.get("filename", ""))
     from crm.db import db_connection
 
     conn = db_connection()
     try:
+        expired_rows = conn.execute(
+            "SELECT filename, rows_storage FROM pending_imports WHERE created_at < ?",
+            (_pending_import_cutoff(now),),
+        ).fetchall()
         conn.execute("DELETE FROM pending_imports WHERE created_at < ?", (_pending_import_cutoff(now),))
         conn.commit()
     finally:
         conn.close()
+    for expired in expired_rows:
+        if expired["rows_storage"] == PENDING_IMPORT_STORAGE_UPLOAD_FILE:
+            _delete_saved_upload(expired["filename"])
 
 
 # ── Capture page helpers ──────────────────────────────────────────────────────

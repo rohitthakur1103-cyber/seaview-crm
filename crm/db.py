@@ -101,6 +101,8 @@ def init_db() -> None:
             columns_json TEXT NOT NULL,
             sample_rows_json TEXT NOT NULL,
             analysis_json TEXT NOT NULL,
+            rows_count INTEGER NOT NULL DEFAULT 0,
+            rows_storage TEXT NOT NULL DEFAULT 'inline',
             created_at TEXT NOT NULL
         );
 
@@ -261,6 +263,8 @@ def init_db() -> None:
     ensure_column(conn, "import_runs", "completed_at", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_status_created_at ON import_runs(status, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_import_runs_pending_import_id ON import_runs(pending_import_id)")
+    ensure_column(conn, "pending_imports", "rows_count", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "pending_imports", "rows_storage", "TEXT NOT NULL DEFAULT 'inline'")
     ensure_column(conn, "tasks", "priority", "TEXT DEFAULT 'medium'")
     ensure_column(conn, "tasks", "priority_score", "INTEGER DEFAULT 50")
     ensure_column(conn, "tasks", "source", "TEXT DEFAULT 'manual'")
