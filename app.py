@@ -4545,8 +4545,12 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
         for row in open_task_rows
     ) or "<li class='action-item'><span class='action-number'>&#10003;</span><div class='action-body'><strong>No open tasks</strong></div></li>"
 
-    # Capture gap % for stat tile
-    capture_gap_pct = f"{capture_gap['capture_rate']:.1f}%" if capture_gap["clover_total"] else "—"
+    capture_gap_count = capture_gap["dark_customers"] if capture_gap["clover_total"] else unreachable
+    capture_gap_note = (
+        f"{capture_gap['capture_rate']:.1f}% email captured"
+        if capture_gap["clover_total"]
+        else "import customer data to measure"
+    )
     freshline_reachable = capture_gap.get("freshline_campaign_ready", data_quality.get("campaign_ready", 0))
     what_changed = (
         f"Latest import: {latest_import['customers_created']} created, {latest_import['customers_updated']} updated, "
@@ -4617,7 +4621,8 @@ def render_dashboard(message: str = "", user: dict | None = None) -> bytes:
       </article>
       <article class="highlight-tile">
         <span>Capture Gap</span>
-        <strong>{capture_gap_pct}</strong>
+        <strong>{capture_gap_count:,}</strong>
+        <small class="stat-sub">{escape(capture_gap_note)}</small>
       </article>
       <article>
         <span>Open Tasks</span>

@@ -330,6 +330,40 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertIn(b"Scroll sideways to inspect additional columns", html)
         self.assertIn(b"Additional Address Info", html)
 
+    def test_seaview_customer_export_updates_dashboard_capture_gap(self):
+        rows = [
+            {
+                "Customer ID": "sv-gap-1",
+                "First Name": "Gap",
+                "Last Name": "Missing",
+                "Marketing Allowed": "Yes",
+            },
+            {
+                "Customer ID": "sv-gap-2",
+                "First Name": "Gap",
+                "Last Name": "Reachable",
+                "Email Address": "gap-reachable@example.com",
+                "Marketing Allowed": "Yes",
+            },
+        ]
+        result = app.import_rows("seaview_customer_export", "gap.csv", rows)
+        self.assertIsNone(result["error_message"])
+
+        conn = app.db_connection()
+        try:
+            gap = app.capture_gap_with_conn(conn)
+        finally:
+            conn.close()
+
+        self.assertEqual(2, gap["clover_total"])
+        self.assertEqual(1, gap["dark_customers"])
+        self.assertEqual(50.0, gap["capture_rate"])
+
+        html = app.render_dashboard(user={"username": "seaview", "role": "admin"})
+        self.assertIn(b"Capture Gap", html)
+        self.assertIn(b"50.0% email captured", html)
+        self.assertNotIn(b"<strong>\xe2\x80\x94</strong>", html)
+
     def test_import_analysis_uses_cached_customer_matching(self):
         seed_row = {
             "First Name": "Cached",

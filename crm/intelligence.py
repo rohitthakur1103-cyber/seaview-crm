@@ -7,7 +7,7 @@ from crm.utils import display_name, display_timestamp, parse_datetime
 
 
 BUSINESS_SEGMENT_KEYS = ("email_ready", "sms_ready", "clean_campaign_ready", "needs_attention")
-CLOVER_SOURCE_SYSTEMS = ("clover",)
+CLOVER_SOURCE_SYSTEMS = ("clover", "seaview_customer_export")
 FRESHLINE_SOURCE_SYSTEM = "freshline_customer_export"
 
 
